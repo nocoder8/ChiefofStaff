@@ -1,0 +1,2 @@
+send an email after a task is scheduled
+If multiple are scheduled in a run, send just 1 email
