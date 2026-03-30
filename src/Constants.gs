@@ -206,6 +206,9 @@ var CosConstants = {
    */
   CLOSURE_RECOVERY_GRACE_HOURS_P0: 6,
 
+  /** Telegram “N business days × M min/h per day” split; max rows created in one message. */
+  TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS: 14,
+
   SCHEMA_VERSION: '2',
 
   DEFAULT_GMAIL_LABEL_PROCESSED: '[Jeeves]/ok',

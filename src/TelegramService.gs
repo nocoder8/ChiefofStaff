@@ -344,6 +344,138 @@ var CosTelegramService = {
   },
 
   /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ baseTitle: string, minutesPerDay: number, businessDayCount: number, startAnchor: string, priority: string }} bd
+   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+   * @private
+   */
+  _handleBusinessDaySplit_: function (chatStr, tok, bd, ss) {
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(120000)) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Busy scheduling — try again in a moment.'
+      );
+      return;
+    }
+    try {
+      var settings = new CosSettingsRepository().getSettings();
+      var tz =
+        String(settings.timezone || '').trim() || ss.getSpreadsheetTimeZone();
+      var anchor = bd.startAnchor === 'today' ? 'today' : 'next_day';
+      var ymds = CosBusinessDaySplitService.collectBusinessDayYmds_(
+        tz,
+        anchor,
+        bd.businessDayCount
+      );
+      if (!ymds || !ymds.length) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Could not build business-day list (check sheet timezone).'
+        );
+        return;
+      }
+
+      var calRepo = CosCalendarRepository.fromSettings(settings);
+      var now = new Date();
+      var horizonEnd = cos_addCalendarDays_(now, 56);
+      var busyRaw = calRepo.listBusyIntervals(
+        cos_addCalendarDays_(now, -1),
+        horizonEnd
+      );
+      var busy = busyRaw.map(function (b) {
+        return {
+          start: b.start,
+          end: b.end,
+          id: b.id,
+          title: b.title,
+        };
+      });
+
+      var repo = new CosTaskRepository(ss);
+      var okLines = [];
+      var badLines = [];
+      var i;
+      var n = ymds.length;
+      for (i = 0; i < n; i++) {
+        var ymd = ymds[i];
+        var rowTitle =
+          bd.baseTitle + ' (' + String(i + 1) + '/' + String(n) + ')';
+        var task = repo.createTask({
+          task: rowTitle,
+          priority: bd.priority,
+          durationMin: bd.minutesPerDay,
+          source: CosConstants.TASK_SOURCE.TELEGRAM,
+          notes: '',
+        });
+        var sch = CosTaskSchedulerService.schedulePendingTaskOnLocalYmd(
+          ss,
+          task.taskId,
+          ymd,
+          busy
+        );
+        if (sch.result === 'scheduled' && sch.slot) {
+          busy.push({
+            start: sch.slot.start,
+            end: sch.slot.end,
+            id: '',
+            title:
+              CosConstants.CALENDAR_JEEVES_EVENT_TITLE_PREFIX +
+              '(split batch)',
+          });
+          okLines.push(
+            '• ' +
+              ymd +
+              ' row ' +
+              task.rowNumber +
+              ' · ' +
+              Utilities.formatDate(sch.slot.start, tz, 'EEE HH:mm')
+          );
+        } else {
+          badLines.push(
+            '• ' +
+              ymd +
+              ' row ' +
+              task.rowNumber +
+              ' — ' +
+              String((sch.detail && sch.detail.reason) || sch.result || '?')
+          );
+        }
+      }
+
+      var msg =
+        '📅 Business-day split: ' +
+        String(okLines.length) +
+        '/' +
+        String(n) +
+        ' scheduled\n' +
+        okLines.join('\n');
+      if (badLines.length) {
+        msg += '\n\nNot booked (still Pending):\n' + badLines.join('\n');
+      }
+      msg += '\n\nSheet TZ: ' + tz + ' · weekdays only';
+      CosTelegramService._replyPlain_(chatStr, tok, msg);
+      CosLogger.info('Telegram business-day split', {
+        booked: okLines.length,
+        failed: badLines.length,
+        anchor: anchor,
+      });
+    } catch (err) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Split booking failed: ' + String(err.message || err).substring(0, 300)
+      );
+      CosLogger.error('Telegram business-day split', { error: String(err) });
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
    * Web app POST may expose URL query as e.parameter, e.parameters, or e.queryString.
    * @param {Object} e
    * @returns {string}
@@ -573,6 +705,34 @@ var CosTelegramWebhook = {
           'New tasks here are off. Reply to the Jeeves prompt with 1–4 (or 2two / 2three / 2four), or enable task capture / use the sheet.'
         );
       }
+      return;
+    }
+
+    var bd = CosTelegramTaskCaptureParser.parseBusinessDaySplit(text);
+    if (bd.ok) {
+      var ssBd = CosBootstrap.getSpreadsheetForRun();
+      if (!ssBd) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Spreadsheet not reachable. Open the Tasks sheet once or set BOUND_SPREADSHEET_ID and run Install.'
+        );
+        return;
+      }
+      CosTelegramService._handleBusinessDaySplit_(chatStr, tok, bd, ssBd);
+      return;
+    }
+    if (
+      bd.code !== 'no_match' &&
+      bd.code !== 'slash' &&
+      bd.code !== 'empty_or_long'
+    ) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        bd.helpText ||
+          'Could not parse business-day split. Say duration per day + number of business days + “to …” for the work.'
+      );
       return;
     }
 

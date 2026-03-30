@@ -407,6 +407,7 @@ var CosTaskSchedulerService = {
    * @param {number} horizonDays
    * @param {number} stepMin
    * @param {{start:Date,end:Date}[]} busy
+   * @param {string=} restrictToYmd If set, only search this local yyyy-MM-dd (business-day split).
    * @returns {{ result: string, slot: {start:Date,end:Date}|null, detail: Object }}
    * @private
    */
@@ -419,7 +420,8 @@ var CosTaskSchedulerService = {
     now,
     horizonDays,
     stepMin,
-    busy
+    busy,
+    restrictToYmd
   ) {
     var taskId = task.taskId;
     var baseDetail = { taskId: taskId, title: task.task };
@@ -497,36 +499,59 @@ var CosTaskSchedulerService = {
       delayHours: delayH,
       minSlotStartIso: minSlotStart.toISOString(),
       jeevesDeferYmd: deferYmd || '',
+      restrictToYmd: restrictToYmd || '',
       deadline: task.deadline || '',
       durationMin: dur,
     });
 
-    var slot = CosTaskSchedulerService._findEarliestSlot_(
-      workModel,
-      tz,
-      stepMin,
-      dur,
-      horizonDays,
-      now,
-      busy,
-      deadline,
-      minSlotStart
-    );
+    var ry = String(restrictToYmd || '').trim();
+    var slot =
+      ry && /^\d{4}-\d{2}-\d{2}$/.test(ry)
+        ? CosTaskSchedulerService._trySlotOnYmd_(
+            workModel,
+            ry,
+            tz,
+            stepMin,
+            dur,
+            busy,
+            deadline,
+            minSlotStart
+          )
+        : CosTaskSchedulerService._findEarliestSlot_(
+            workModel,
+            tz,
+            stepMin,
+            dur,
+            horizonDays,
+            now,
+            busy,
+            deadline,
+            minSlotStart
+          );
 
     if (!slot) {
-      CosSchedulingLog.log('no slot in horizon', {
-        taskId: taskId,
-        priority: task.priority,
-        delayHours: delayH,
-        minSlotStartIso: minSlotStart.toISOString(),
-      });
+      if (ry) {
+        CosSchedulingLog.log('no slot on restricted day', {
+          taskId: taskId,
+          ymd: ry,
+          minSlotStartIso: minSlotStart.toISOString(),
+        });
+      } else {
+        CosSchedulingLog.log('no slot in horizon', {
+          taskId: taskId,
+          priority: task.priority,
+          delayHours: delayH,
+          minSlotStartIso: minSlotStart.toISOString(),
+        });
+      }
       CosLogger.warn('no slot for task', baseDetail);
       return {
         result: 'failed',
         slot: null,
         detail: Object.assign({}, baseDetail, {
           result: 'failed',
-          reason: 'no_slot',
+          reason: ry ? 'no_slot_on_day' : 'no_slot',
+          ymd: ry || undefined,
         }),
       };
     }
@@ -744,6 +769,145 @@ var CosTaskSchedulerService = {
   },
 
   /**
+   * First viable slot on a single local calendar day (work hours + busy + min start + deadline).
+   * @param {CosWorkHoursWeek} workModel
+   * @param {string} ymd yyyy-MM-dd
+   * @param {string} tz
+   * @param {number} stepMin
+   * @param {number} durationMin
+   * @param {{start:Date,end:Date,id?:string,title?:string}[]} busy
+   * @param {Date|null} deadline
+   * @param {Date} minSlotStart
+   * @returns {{start:Date,end:Date}|null}
+   * @private
+   */
+  _trySlotOnYmd_: function (
+    workModel,
+    ymd,
+    tz,
+    stepMin,
+    durationMin,
+    busy,
+    deadline,
+    minSlotStart
+  ) {
+    var dayProbe = Utilities.parseDate(ymd + ' 12:00', tz, 'yyyy-MM-dd HH:mm');
+    var dayKey = CosWorkHoursParser.dayKeyForDate(dayProbe, tz);
+    var blocks = CosWorkHoursParser.blocksForDay(workModel, dayKey);
+    var verboseDay = CosSchedulingLog.enabled();
+    /** @type {{ ymd: string, dayKey: string, viable: number, busyRejections: number }|null} */
+    var dayStat = null;
+    if (verboseDay && blocks.length > 0) {
+      dayStat = {
+        ymd: ymd,
+        dayKey: dayKey,
+        viable: 0,
+        busyRejections: 0,
+      };
+    }
+
+    var bi;
+    for (bi = 0; bi < blocks.length; bi++) {
+      var blk = blocks[bi];
+      var cs = CosWorkHoursParser.parseClock(blk.start);
+      var ce = CosWorkHoursParser.parseClock(blk.end);
+      if (!cs || !ce) {
+        continue;
+      }
+      var blockStart = cos_combineDateAndTime_(
+        ymd,
+        cos_pad2_(cs.h) + ':' + cos_pad2_(cs.m),
+        tz
+      );
+      var blockEnd = cos_combineDateAndTime_(
+        ymd,
+        cos_pad2_(ce.h) + ':' + cos_pad2_(ce.m),
+        tz
+      );
+      if (blockEnd.getTime() <= blockStart.getTime()) {
+        continue;
+      }
+
+      var t;
+      for (
+        t = new Date(blockStart.getTime());
+        t.getTime() < blockEnd.getTime();
+        t = cos_addMinutes_(t, stepMin)
+      ) {
+        var slotEnd = cos_addMinutes_(t, durationMin);
+        if (slotEnd.getTime() > blockEnd.getTime()) {
+          break;
+        }
+        if (t.getTime() < minSlotStart.getTime() - 60000) {
+          continue;
+        }
+        if (deadline && slotEnd.getTime() > deadline.getTime()) {
+          continue;
+        }
+        if (dayStat) {
+          dayStat.viable++;
+        }
+        if (!cos_rangeCollidesBusy_(t, slotEnd, busy)) {
+          if (dayStat) {
+            CosSchedulingLog.log('slot found', {
+              ymd: ymd,
+              dayKey: dayKey,
+              localStart: Utilities.formatDate(t, tz, 'yyyy-MM-dd HH:mm'),
+              durationMin: durationMin,
+              viableGridStartsToday: dayStat.viable,
+              busyRejectionsBeforePick: dayStat.busyRejections,
+            });
+          }
+          return { start: t, end: slotEnd };
+        }
+        if (dayStat) {
+          dayStat.busyRejections++;
+        }
+      }
+    }
+
+    if (dayStat) {
+      if (dayStat.viable === 0) {
+        CosSchedulingLog.log('work day skipped (no grid start passes min time + deadline)', {
+          ymd: dayStat.ymd,
+          dayKey: dayStat.dayKey,
+          durationMin: durationMin,
+          minSlotLocal: Utilities.formatDate(minSlotStart, tz, 'yyyy-MM-dd HH:mm'),
+        });
+      } else {
+        CosSchedulingLog.log(
+          'work day exhausted (every viable slot collides with calendar)',
+          {
+            ymd: dayStat.ymd,
+            dayKey: dayStat.dayKey,
+            durationMin: durationMin,
+            viableGridStarts: dayStat.viable,
+            busyRejections: dayStat.busyRejections,
+          }
+        );
+        var sample = CosTaskSchedulerService._firstCollisionSampleForDay_(
+          workModel,
+          dayStat.ymd,
+          dayStat.dayKey,
+          tz,
+          stepMin,
+          durationMin,
+          minSlotStart,
+          deadline,
+          busy
+        );
+        if (sample && sample.collidesWith) {
+          CosSchedulingLog.log(
+            'exhausted day: first viable slot blocked by (primary calendar event)',
+            sample
+          );
+        }
+      }
+    }
+    return null;
+  },
+
+  /**
    * @param {CosWorkHoursWeek} workModel
    * @param {string} tz
    * @param {number} stepMin
@@ -768,130 +932,76 @@ var CosTaskSchedulerService = {
     minSlotStart
   ) {
     var startYmd = cos_formatYmd_(now, tz);
-    var verboseDay = CosSchedulingLog.enabled();
-
-    for (var dayOffset = 0; dayOffset <= horizonDays; dayOffset++) {
+    var dayOffset;
+    for (dayOffset = 0; dayOffset <= horizonDays; dayOffset++) {
       var ymd = cos_ymdAddCalendarDays_(startYmd, dayOffset, tz);
-      var dayProbe = Utilities.parseDate(ymd + ' 12:00', tz, 'yyyy-MM-dd HH:mm');
-      var dayKey = CosWorkHoursParser.dayKeyForDate(dayProbe, tz);
-      var blocks = CosWorkHoursParser.blocksForDay(workModel, dayKey);
-
-      /** @type {{ ymd: string, dayKey: string, viable: number, busyRejections: number }|null} */
-      var dayStat = null;
-      if (verboseDay && blocks.length > 0) {
-        dayStat = {
-          ymd: ymd,
-          dayKey: dayKey,
-          viable: 0,
-          busyRejections: 0,
-        };
-      }
-
-      for (var bi = 0; bi < blocks.length; bi++) {
-        var blk = blocks[bi];
-        var cs = CosWorkHoursParser.parseClock(blk.start);
-        var ce = CosWorkHoursParser.parseClock(blk.end);
-        if (!cs || !ce) {
-          continue;
-        }
-        var blockStart = cos_combineDateAndTime_(
-          ymd,
-          cos_pad2_(cs.h) + ':' + cos_pad2_(cs.m),
-          tz
-        );
-        var blockEnd = cos_combineDateAndTime_(
-          ymd,
-          cos_pad2_(ce.h) + ':' + cos_pad2_(ce.m),
-          tz
-        );
-        if (blockEnd.getTime() <= blockStart.getTime()) {
-          continue;
-        }
-
-        for (
-          var t = new Date(blockStart.getTime());
-          t.getTime() < blockEnd.getTime();
-          t = cos_addMinutes_(t, stepMin)
-        ) {
-          var slotEnd = cos_addMinutes_(t, durationMin);
-          if (slotEnd.getTime() > blockEnd.getTime()) {
-            break;
-          }
-          if (t.getTime() < minSlotStart.getTime() - 60000) {
-            continue;
-          }
-          if (
-            deadline &&
-            slotEnd.getTime() > deadline.getTime()
-          ) {
-            continue;
-          }
-          if (dayStat) {
-            dayStat.viable++;
-          }
-          if (!cos_rangeCollidesBusy_(t, slotEnd, busy)) {
-            if (dayStat) {
-              CosSchedulingLog.log('slot found', {
-                ymd: ymd,
-                dayKey: dayKey,
-                localStart: Utilities.formatDate(t, tz, 'yyyy-MM-dd HH:mm'),
-                durationMin: durationMin,
-                viableGridStartsToday: dayStat.viable,
-                busyRejectionsBeforePick: dayStat.busyRejections,
-              });
-            }
-            return { start: t, end: slotEnd };
-          }
-          if (dayStat) {
-            dayStat.busyRejections++;
-          }
-        }
-      }
-
-      if (dayStat) {
-        if (dayStat.viable === 0) {
-          CosSchedulingLog.log('work day skipped (no grid start passes min time + deadline)', {
-            ymd: dayStat.ymd,
-            dayKey: dayStat.dayKey,
-            durationMin: durationMin,
-            minSlotLocal: Utilities.formatDate(
-              minSlotStart,
-              tz,
-              'yyyy-MM-dd HH:mm'
-            ),
-          });
-        } else {
-          CosSchedulingLog.log(
-            'work day exhausted (every viable slot collides with calendar)',
-            {
-              ymd: dayStat.ymd,
-              dayKey: dayStat.dayKey,
-              durationMin: durationMin,
-              viableGridStarts: dayStat.viable,
-              busyRejections: dayStat.busyRejections,
-            }
-          );
-          var sample = CosTaskSchedulerService._firstCollisionSampleForDay_(
-            workModel,
-            dayStat.ymd,
-            dayStat.dayKey,
-            tz,
-            stepMin,
-            durationMin,
-            minSlotStart,
-            deadline,
-            busy
-          );
-          if (sample && sample.collidesWith) {
-            CosSchedulingLog.log(
-              'exhausted day: first viable slot blocked by (primary calendar event)',
-              sample
-            );
-          }
-        }
+      var slot = CosTaskSchedulerService._trySlotOnYmd_(
+        workModel,
+        ymd,
+        tz,
+        stepMin,
+        durationMin,
+        busy,
+        deadline,
+        minSlotStart
+      );
+      if (slot) {
+        return slot;
       }
     }
     return null;
+  },
+
+  /**
+   * Schedule one Pending task on a specific local date (Telegram business-day split).
+   * Mutates busy in place when scheduling succeeds (same batch semantics as _runBatch_).
+   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+   * @param {string} taskId
+   * @param {string} localYmd yyyy-MM-dd
+   * @param {{start:Date,end:Date,id?:string,title?:string}[]} busy
+   * @returns {{ result: string, slot?: {start:Date,end:Date}, detail: Object }}
+   */
+  schedulePendingTaskOnLocalYmd: function (ss, taskId, localYmd, busy) {
+    var id = String(taskId || '').trim();
+    var ymd = String(localYmd || '').trim();
+    if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+      return {
+        result: 'failed',
+        detail: { taskId: id, result: 'failed', reason: 'bad_args' },
+      };
+    }
+    var settings = new CosSettingsRepository().getSettings();
+    var tz =
+      String(settings.timezone || '').trim() || ss.getSpreadsheetTimeZone();
+    var workModel = CosWorkHoursParser.parseModel(settings.workHoursJson);
+    var calRepo = CosCalendarRepository.fromSettings(settings);
+    var taskRepo = new CosTaskRepository(ss);
+    var task = taskRepo.fetchByTaskId(id);
+    if (!task) {
+      return {
+        result: 'failed',
+        detail: { taskId: id, result: 'failed', reason: 'not_found' },
+      };
+    }
+    var now = new Date();
+    var horizonDays = CosConstants.SCHEDULING_HORIZON_DAYS;
+    var one = CosTaskSchedulerService._scheduleSingleTask_(
+      task,
+      taskRepo,
+      calRepo,
+      workModel,
+      tz,
+      now,
+      horizonDays,
+      CosConstants.SCHEDULING_SLOT_STEP_MINUTES,
+      busy,
+      ymd
+    );
+    return {
+      result: one.result,
+      slot: one.slot || undefined,
+      detail: one.detail,
+    };
   },
 };
 

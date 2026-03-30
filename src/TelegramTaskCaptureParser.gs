@@ -7,6 +7,118 @@ var CosTelegramTaskCaptureParser = {
   MAX_INPUT_LEN: 4000,
 
   /**
+   * “1h per day for the next 5 business days to …” → book one row per weekday (sheet TZ).
+   * @param {string} rawText
+   * @returns {{ ok: true, baseTitle: string, minutesPerDay: number, businessDayCount: number, startAnchor: string, priority: string } | { ok: false, code: string, helpText?: string }}
+   */
+  parseBusinessDaySplit: function (rawText) {
+    var raw = String(rawText || '').replace(/^\s+|\s+$/g, '');
+    if (!raw || raw.length > CosTelegramTaskCaptureParser.MAX_INPUT_LEN) {
+      return { ok: false, code: 'empty_or_long' };
+    }
+    if (/^\//.test(raw)) {
+      return { ok: false, code: 'slash' };
+    }
+    var lower = raw.toLowerCase();
+    if (!/business\s+days?/.test(lower)) {
+      return { ok: false, code: 'no_match' };
+    }
+    if (!/per\s+day|each\s+day|every\s+day|a\s+day\b/.test(lower)) {
+      return { ok: false, code: 'no_match' };
+    }
+
+    var countM =
+      /\b(?:the\s+)?next\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw) ||
+      /\bfor\s+the\s+next\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw) ||
+      /\bfor\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw);
+    if (!countM) {
+      return {
+        ok: false,
+        code: 'no_count',
+        helpText:
+          'Say how many weekdays, e.g. “for the next 5 business days”.',
+      };
+    }
+    var n = parseInt(countM[1], 10);
+    if (
+      isNaN(n) ||
+      n < 1 ||
+      n > CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS
+    ) {
+      return {
+        ok: false,
+        code: 'bad_count',
+        helpText:
+          'Use 1–' +
+          CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS +
+          ' business days.',
+      };
+    }
+
+    var minutes = null;
+    var hPer = /\b(\d{1,2})\s*(?:hours?|hrs?)\s+per\s+day\b/i.exec(raw);
+    if (hPer) {
+      minutes = parseInt(hPer[1], 10) * 60;
+    } else {
+      var mPer =
+        /\b(\d{1,3})\s*(?:min|minutes|mins)\s+per\s+day\b/i.exec(raw);
+      if (mPer) {
+        minutes = parseInt(mPer[1], 10);
+      }
+    }
+    if (minutes === null || minutes < 5 || minutes > 480) {
+      return {
+        ok: false,
+        code: 'bad_duration',
+        helpText:
+          'Include duration per day, e.g. “1 hour per day” or “45 minutes per day”.',
+      };
+    }
+
+    var startAnchor = /\bstarting\s+today\b/i.test(raw) ? 'today' : 'next_day';
+    var pr = CosTelegramTaskCaptureParser._extractPriority_(raw);
+    var title = CosTelegramTaskCaptureParser._titleFromBusinessSplit_(raw);
+    title = CosTelegramTaskCaptureParser._cleanTitle_(title);
+    if (!title || title.length < 2) {
+      return {
+        ok: false,
+        code: 'no_title',
+        helpText:
+          'End with what you’re doing, e.g. “… to build a deck for the CEO”.',
+      };
+    }
+
+    return {
+      ok: true,
+      baseTitle: title.substring(0, CosTelegramTaskCaptureParser.MAX_TITLE_LEN),
+      minutesPerDay: minutes,
+      businessDayCount: n,
+      startAnchor: startAnchor,
+      priority: pr || CosConstants.TASK_PRIORITY.P2,
+    };
+  },
+
+  /**
+   * @param {string} raw one line normalized optional
+   * @returns {string}
+   * @private
+   */
+  _titleFromBusinessSplit_: function (raw) {
+    var oneLine = String(raw || '').replace(/\s+/g, ' ').trim();
+    var m = /\bto\s+(.+)$/i.exec(oneLine);
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\bfor\s+the\s+next\s+\d+\s+business\s+days?\s+to\s+(.+)/i.exec(
+      oneLine
+    );
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    return '';
+  },
+
+  /**
    * @param {string} rawText
    * @returns {{ ok: true, task: string, priority: string, durationMin: string, notes: string } | { ok: false, code: string, helpText?: string }}
    */
@@ -88,7 +200,9 @@ var CosTelegramTaskCaptureParser = {
       '• Task P1 45 mins: Finish CHRO deck\n' +
       '• Create task: Review scorecard\n' +
       '• Follow up with finance\n' +
-      '• Remind me to prepare notes for 20 mins\n\n' +
+      '• Remind me to prepare notes for 20 mins\n' +
+      '• 1 hour per day for the next 5 business days to build a deck for the CEO\n' +
+      '  (add “starting today” to include today if it’s a weekday)\n\n' +
       'Defaults: priority P2, duration 30 min. Closure replies (1–4) must be replies to the Jeeves prompt.'
     );
   },
@@ -124,6 +238,9 @@ var CosTelegramTaskCaptureParser = {
       return true;
     }
     if (/^remind\s+me\b/i.test(lowerWork)) {
+      return true;
+    }
+    if (/business\s+days?/.test(lowerFull) && /per\s+day|each\s+day|every\s+day/.test(lowerFull)) {
       return true;
     }
     return false;
@@ -291,6 +408,22 @@ var CosTelegramTaskCaptureParser = {
     var failed = 0;
     var failures = [];
     var i;
+    var bs = CosTelegramTaskCaptureParser.parseBusinessDaySplit(
+      'I need to dedicate 1 hour per day for the next 5 business days to build a deck for the CEO'
+    );
+    if (
+      bs.ok &&
+      bs.businessDayCount === 5 &&
+      bs.minutesPerDay === 60 &&
+      bs.startAnchor === 'next_day' &&
+      /deck/i.test(bs.baseTitle)
+    ) {
+      passed++;
+    } else {
+      failed++;
+      failures.push('business-day split CEO deck example');
+    }
+
     for (i = 0; i < cases.length; i++) {
       var c = cases[i];
       var r = CosTelegramTaskCaptureParser.parse(c.in);
