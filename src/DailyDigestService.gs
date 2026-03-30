@@ -85,8 +85,21 @@ var CosDailyDigestService = {
         CosConstants.PRODUCT_NAME +
         '] Daily digest — ' +
         Utilities.formatDate(now, tz, 'EEE, MMM d, yyyy');
-      var plain = CosDailyDigestService._buildPlain_(bundle, tz, dayKey, snippetMap);
-      var html = CosDailyDigestService._buildHtml_(bundle, tz, dayKey, now, snippetMap);
+      var plain = CosDailyDigestService._buildPlain_(
+        bundle,
+        tz,
+        dayKey,
+        snippetMap,
+        settings
+      );
+      var html = CosDailyDigestService._buildHtml_(
+        bundle,
+        tz,
+        dayKey,
+        now,
+        snippetMap,
+        settings
+      );
 
       GmailApp.sendEmail(to, subject, plain, {
         htmlBody: html,
@@ -131,6 +144,8 @@ var CosDailyDigestService = {
     var overdue = [];
     /** @type {CosTask[]} */
     var scheduledJeevesWeek = [];
+    /** @type {CosTask[]} */
+    var awaitingClosure = [];
 
     var todayKey = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
     var weekEndMs =
@@ -148,8 +163,15 @@ var CosDailyDigestService = {
       if (st === CosConstants.TASK_STATUS.DONE) {
         continue;
       }
+      if (st === CosConstants.TASK_STATUS.DROPPED) {
+        continue;
+      }
       if (st === CosConstants.TASK_STATUS.PAUSED) {
         continue;
+      }
+
+      if (st === CosConstants.TASK_STATUS.AWAITING_CLOSURE) {
+        awaitingClosure.push(t);
       }
 
       if (st === CosConstants.TASK_STATUS.SCHEDULED) {
@@ -206,6 +228,7 @@ var CosDailyDigestService = {
 
     scheduledToday.sort(CosDailyDigestService._cmpScheduledStart_);
     scheduledJeevesWeek.sort(CosDailyDigestService._cmpScheduledJeevesWeek_);
+    awaitingClosure.sort(CosDailyDigestService._cmpClosureRequested_);
     pending.sort(CosDailyDigestService._cmpPriorityThenTitle_);
     followUpOverdue.sort(CosDailyDigestService._cmpCreatedAsc_);
     followUpWaiting.sort(CosDailyDigestService._cmpCreatedAsc_);
@@ -215,12 +238,30 @@ var CosDailyDigestService = {
     return {
       scheduledToday: scheduledToday,
       scheduledJeevesWeek: scheduledJeevesWeek,
+      awaitingClosure: awaitingClosure,
       pending: pending,
       followUpOverdue: followUpOverdue,
       followUpWaiting: followUpWaiting,
       dueToday: dueToday,
       overdue: overdue,
     };
+  },
+
+  /**
+   * @param {CosTask} a
+   * @param {CosTask} b
+   * @returns {number}
+   * @private
+   */
+  _cmpClosureRequested_: function (a, b) {
+    var da = CosDailyDigestService._parseIso_(a.closureRequestedAt);
+    var db = CosDailyDigestService._parseIso_(b.closureRequestedAt);
+    var ta = da ? da.getTime() : 0;
+    var tb = db ? db.getTime() : 0;
+    if (ta !== tb) {
+      return ta - tb;
+    }
+    return String(a.task).localeCompare(String(b.task));
   },
 
   /**
@@ -359,10 +400,11 @@ var CosDailyDigestService = {
    * @param {string} tz
    * @param {string} dayKey
    * @param {Object<string, { line: string, source: string }>} snippetMap
+   * @param {CosSettings} settings
    * @returns {string}
    * @private
    */
-  _buildPlain_: function (bundle, tz, dayKey, snippetMap) {
+  _buildPlain_: function (bundle, tz, dayKey, snippetMap, settings) {
     var lines = [];
     lines.push('Daily digest for ' + dayKey + ' (' + tz + ').');
     lines.push('');
@@ -389,6 +431,15 @@ var CosDailyDigestService = {
           t.durationMin +
           'm]'
         );
+      },
+      true
+    );
+    CosDailyDigestService._appendPlainSection_(
+      lines,
+      'Awaiting closure (tap links on phone — needs web app URL in Script Properties)',
+      bundle.awaitingClosure,
+      function (t) {
+        return CosDailyDigestService._lineAwaitingClosurePlain_(t, settings);
       },
       true
     );
@@ -486,9 +537,51 @@ var CosDailyDigestService = {
 
   /**
    * @param {CosTask} t
+   * @param {CosSettings} settings
    * @returns {string}
    * @private
    */
+  _lineAwaitingClosurePlain_: function (t, settings) {
+    var id = String(t.taskId || '').trim();
+    var head = '• ' + t.task;
+    if (!CosClosureLinkService.isConfigured(settings)) {
+      return (
+        head +
+        '\n  (Set CLOSURE_WEBAPP_URL after deploying the web app — see README.)'
+      );
+    }
+    return (
+      head +
+      '\n  Actions: ' +
+      CosClosureLinkService.buildClosureMenuUrl(id, settings)
+    );
+  },
+
+  /**
+   * @param {CosTask} t
+   * @param {CosSettings} settings
+   * @returns {string}
+   * @private
+   */
+  _htmlAwaitingClosureBlock_: function (t, settings) {
+    var id = String(t.taskId || '').trim();
+    var links = CosClosureLinkService.buildHtmlActionRow(id, settings);
+    var parts = [];
+    parts.push(
+      '<div style="font:600 15px/1.3 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#202124;">' +
+        CosDailyDigestService._esc_(t.task) +
+        '</div>'
+    );
+    if (links) {
+      parts.push(links);
+    } else {
+      parts.push(
+        '<p style="margin:6px 0 0;font:12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#5f6368;">Deploy the closure web app and set CLOSURE_WEBAPP_URL (README).</p>'
+      );
+    }
+    return parts.join('');
+  },
+
   /**
    * @param {CosTask} t
    * @param {string} tz
@@ -666,10 +759,11 @@ var CosDailyDigestService = {
    * @param {string} dayKey
    * @param {Date} now
    * @param {Object<string, { line: string, source: string }>} snippetMap
+   * @param {CosSettings} settings
    * @returns {string}
    * @private
    */
-  _buildHtml_: function (bundle, tz, dayKey, now, snippetMap) {
+  _buildHtml_: function (bundle, tz, dayKey, now, snippetMap, settings) {
     var pre = CosDailyDigestService._preheaderSummary_(bundle);
     var headDate = Utilities.formatDate(now, tz, 'EEE, MMM d, yyyy');
     var parts = [];
@@ -723,6 +817,15 @@ var CosDailyDigestService = {
         );
       },
       { titleColor: '#1a73e8' }
+    );
+    CosDailyDigestService._appendHtmlCardSection_(
+      parts,
+      'Awaiting closure',
+      bundle.awaitingClosure,
+      function (t) {
+        return CosDailyDigestService._htmlAwaitingClosureBlock_(t, settings);
+      },
+      { titleColor: '#b06000', itemGap: true }
     );
     CosDailyDigestService._appendHtmlCardSection_(
       parts,
@@ -845,6 +948,10 @@ var CosDailyDigestService = {
         bundle.scheduledJeevesWeek.length +
           ' later this week (Jeeves)'
       );
+    }
+    var ac = bundle.awaitingClosure || [];
+    if (ac.length) {
+      bits.push(ac.length + ' awaiting closure');
     }
     var fu =
       bundle.followUpOverdue.length + bundle.followUpWaiting.length;

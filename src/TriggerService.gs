@@ -1,11 +1,17 @@
 /**
  * Phase 7: install/repair time-driven triggers from Script Properties (idempotent).
- * Handlers live in Main.gs: cos_triggerProcessGmail_, cos_triggerSchedulePending_, cos_triggerDailyDigest_.
+ * Handlers live in Main.gs: cos_triggerProcessGmail_, cos_triggerSchedulePending_,
+ * cos_triggerDailyDigest_, cos_triggerClosureMaintenance_ (closure cadence in Constants),
+ * cos_triggerCalendarJeevesSync_,
+ * cos_triggerTelegramPoll_.
  */
 var CosTriggerService = {
   HANDLER_GMAIL: 'cos_triggerProcessGmail_',
   HANDLER_SCHEDULE: 'cos_triggerSchedulePending_',
   HANDLER_DIGEST: 'cos_triggerDailyDigest_',
+  HANDLER_CLOSURE_MAINTENANCE: 'cos_triggerClosureMaintenance_',
+  HANDLER_CALENDAR_JEEVES_SYNC: 'cos_triggerCalendarJeevesSync_',
+  HANDLER_TELEGRAM_POLL: 'cos_triggerTelegramPoll_',
 
   /**
    * Removes Chief-of-Staff triggers for known handlers, then recreates from settings.
@@ -40,6 +46,18 @@ var CosTriggerService = {
         );
       }
 
+      if (settings.calendarSyncTriggerEnabled) {
+        ScriptApp.newTrigger(CosTriggerService.HANDLER_CALENDAR_JEEVES_SYNC)
+          .timeBased()
+          .everyMinutes(CosConstants.TRIGGER_CALENDAR_JEEVES_SYNC_EVERY_MINUTES)
+          .create();
+        installed.push(
+          'Jeeves calendar sync every ' +
+            CosConstants.TRIGGER_CALENDAR_JEEVES_SYNC_EVERY_MINUTES +
+            ' min'
+        );
+      }
+
       if (settings.dailyDigestEnabled) {
         var tz =
           String(settings.timezone || '').trim() || spreadsheetTimeZone;
@@ -61,6 +79,30 @@ var CosTriggerService = {
         );
       }
 
+      if (settings.closureMaintenanceTriggerEnabled) {
+        ScriptApp.newTrigger(CosTriggerService.HANDLER_CLOSURE_MAINTENANCE)
+          .timeBased()
+          .everyMinutes(CosConstants.TRIGGER_CLOSURE_MAINTENANCE_EVERY_MINUTES)
+          .create();
+        installed.push(
+          'Closure maintenance every ' +
+            CosConstants.TRIGGER_CLOSURE_MAINTENANCE_EVERY_MINUTES +
+            ' min'
+        );
+      }
+
+      if (CosTriggerService._telegramPollWanted_(settings)) {
+        ScriptApp.newTrigger(CosTriggerService.HANDLER_TELEGRAM_POLL)
+          .timeBased()
+          .everyMinutes(CosConstants.TRIGGER_TELEGRAM_POLL_EVERY_MINUTES)
+          .create();
+        installed.push(
+          'Telegram poll every ' +
+            CosConstants.TRIGGER_TELEGRAM_POLL_EVERY_MINUTES +
+            ' min'
+        );
+      }
+
       CosLogger.info('Triggers synced', { installed: installed });
       return { ok: true, installed: installed };
     } catch (e) {
@@ -73,11 +115,31 @@ var CosTriggerService = {
   /**
    * @private
    */
+  /**
+   * @param {CosSettings} settings
+   * @returns {boolean}
+   * @private
+   */
+  _telegramPollWanted_: function (settings) {
+    if (!settings.telegramUsePolling) {
+      return false;
+    }
+    if (!settings.telegramClosureEnabled && !settings.telegramTaskCaptureEnabled) {
+      return false;
+    }
+    var tok = String(settings.telegramBotToken || '').trim();
+    var chat = String(settings.telegramChatId || '').trim();
+    return tok.length >= 10 && chat.length >= 1;
+  },
+
   _deleteOurTriggers_: function () {
     var handlers = {};
     handlers[CosTriggerService.HANDLER_GMAIL] = true;
     handlers[CosTriggerService.HANDLER_SCHEDULE] = true;
     handlers[CosTriggerService.HANDLER_DIGEST] = true;
+    handlers[CosTriggerService.HANDLER_CLOSURE_MAINTENANCE] = true;
+    handlers[CosTriggerService.HANDLER_CALENDAR_JEEVES_SYNC] = true;
+    handlers[CosTriggerService.HANDLER_TELEGRAM_POLL] = true;
     var all = ScriptApp.getProjectTriggers();
     var i;
     for (i = 0; i < all.length; i++) {

@@ -1,6 +1,7 @@
 /**
  * Phase 6 (Project Plan): operational health — spreadsheet, Tasks schema, properties,
- * calendar, Gmail labels (when enabled), and time triggers vs settings.
+ * calendar, Gmail labels (when enabled), time triggers vs settings, closure maintenance
+ * trigger parity, closure signed-link configuration, and Jeeves calendar sync trigger parity.
  */
 var CosHealthCheckService = {
   /**
@@ -190,8 +191,123 @@ var CosHealthCheckService = {
     }
 
     CosHealthCheckService._checkTriggers_(items, settings);
+    CosHealthCheckService._checkClosureSignedLinks_(items, settings);
+    CosHealthCheckService._checkTelegramClosure_(items, settings);
 
     return CosHealthCheckService._finalize_(items);
+  },
+
+  /**
+   * @param {CosHealthCheckItem[]} items
+   * @param {CosSettings} settings
+   * @private
+   */
+  _checkTelegramClosure_: function (items, settings) {
+    if (!settings.telegramClosureEnabled && !settings.telegramTaskCaptureEnabled) {
+      items.push({
+        id: 'telegram_closure',
+        status: 'pass',
+        message: 'Telegram closure nudges and task capture both disabled.',
+      });
+      return;
+    }
+    var tok = String(settings.telegramBotToken || '').trim();
+    var chat = String(settings.telegramChatId || '').trim();
+    if (tok.length < 10 || !chat) {
+      items.push({
+        id: 'telegram_closure',
+        status: 'warn',
+        message:
+          'Telegram feature(s) on but bot token or chat id missing — set both in Script Properties or the Chief of Staff menu.',
+      });
+      return;
+    }
+    if (settings.telegramUsePolling) {
+      var pollN = CosHealthCheckService._triggerCount_(
+        CosTriggerService.HANDLER_TELEGRAM_POLL
+      );
+      if (pollN === 0) {
+        items.push({
+          id: 'telegram_closure',
+          status: 'warn',
+          message:
+            'Telegram polling is on but no time trigger — run “Enable Telegram polling” again or Sync time triggers.',
+        });
+      } else if (pollN > 1) {
+        items.push({
+          id: 'telegram_closure',
+          status: 'warn',
+          message:
+            'Duplicate Telegram poll trigger(s) — run “Sync time triggers”.',
+        });
+      } else {
+        items.push({
+          id: 'telegram_closure',
+          status: 'pass',
+          message:
+            'Telegram polling active (getUpdates ~every ' +
+            CosConstants.TRIGGER_TELEGRAM_POLL_EVERY_MINUTES +
+            ' min). Closure: ' +
+            (settings.telegramClosureEnabled ? 'on' : 'off') +
+            ' · Task capture: ' +
+            (settings.telegramTaskCaptureEnabled ? 'on' : 'off'),
+        });
+      }
+      return;
+    }
+
+    var web = String(settings.closureWebAppUrl || '').trim();
+    if (web.indexOf('/exec') < 0 && web.indexOf('/dev') < 0) {
+      items.push({
+        id: 'telegram_closure',
+        status: 'warn',
+        message:
+          'Telegram on but CLOSURE_WEBAPP_URL is not set — deploy the web app and register the webhook, or enable Telegram polling (no public web app).',
+      });
+      return;
+    }
+    var sec = String(settings.telegramWebhookSecret || '').trim();
+    if (sec.length < 8) {
+      items.push({
+        id: 'telegram_closure',
+        status: 'warn',
+        message: 'TELEGRAM_WEBHOOK_SECRET missing — run Install / Repair to seed it.',
+      });
+      return;
+    }
+    items.push({
+      id: 'telegram_closure',
+      status: 'pass',
+      message:
+        'Telegram: token, chat id, web app URL, webhook secret OK — use “Register Telegram webhook” after URL/secret changes. Closure: ' +
+        (settings.telegramClosureEnabled ? 'on' : 'off') +
+        ' · Task capture: ' +
+        (settings.telegramTaskCaptureEnabled ? 'on' : 'off'),
+    });
+  },
+
+  /**
+   * @param {CosHealthCheckItem[]} items
+   * @param {CosSettings} settings
+   * @private
+   */
+  _checkClosureSignedLinks_: function (items, settings) {
+    if (CosClosureLinkService.isConfigured(settings)) {
+      items.push({
+        id: 'closure_signed_links',
+        status: 'pass',
+        message: 'Closure signed links: web app URL and HMAC secret configured.',
+      });
+      return;
+    }
+    items.push({
+      id: 'closure_signed_links',
+      status: 'warn',
+      message:
+        'Tap-to-close closure links are not active — deploy the web app, set CLOSURE_WEBAPP_URL, ' +
+        'and ensure CLOSURE_LINK_SECRET exists (Install / Repair seeds the secret if missing). ' +
+        'Calendar descriptions and digest use fallback text until then.',
+    });
   },
 
   /**
@@ -208,6 +324,15 @@ var CosHealthCheckService = {
     );
     var digestN = CosHealthCheckService._triggerCount_(
       CosTriggerService.HANDLER_DIGEST
+    );
+    var closureN = CosHealthCheckService._triggerCount_(
+      CosTriggerService.HANDLER_CLOSURE_MAINTENANCE
+    );
+    var calSyncN = CosHealthCheckService._triggerCount_(
+      CosTriggerService.HANDLER_CALENDAR_JEEVES_SYNC
+    );
+    var telegramPollN = CosHealthCheckService._triggerCount_(
+      CosTriggerService.HANDLER_TELEGRAM_POLL
     );
 
     CosHealthCheckService._expectTrigger_(
@@ -231,14 +356,49 @@ var CosHealthCheckService = {
       digestN,
       CosTriggerService.HANDLER_DIGEST
     );
+    CosHealthCheckService._expectTrigger_(
+      items,
+      'trigger_closure_maintenance',
+      settings.closureMaintenanceTriggerEnabled,
+      closureN,
+      CosTriggerService.HANDLER_CLOSURE_MAINTENANCE
+    );
+    CosHealthCheckService._expectTrigger_(
+      items,
+      'trigger_calendar_jeeves_sync',
+      settings.calendarSyncTriggerEnabled,
+      calSyncN,
+      CosTriggerService.HANDLER_CALENDAR_JEEVES_SYNC
+    );
+    CosHealthCheckService._expectTrigger_(
+      items,
+      'trigger_telegram_poll',
+      CosTriggerService._telegramPollWanted_(settings),
+      telegramPollN,
+      CosTriggerService.HANDLER_TELEGRAM_POLL
+    );
 
-    if (gmailN > 1 || schedN > 1 || digestN > 1) {
+    if (
+      gmailN > 1 ||
+      schedN > 1 ||
+      digestN > 1 ||
+      closureN > 1 ||
+      calSyncN > 1 ||
+      telegramPollN > 1
+    ) {
       items.push({
         id: 'trigger_duplicates',
         status: 'warn',
         message:
           'Duplicate time trigger(s) detected for the same handler — run “Sync time triggers”.',
-        detail: { gmail: gmailN, schedule: schedN, digest: digestN },
+        detail: {
+          gmail: gmailN,
+          schedule: schedN,
+          digest: digestN,
+          closureMaintenance: closureN,
+          calendarJeevesSync: calSyncN,
+          telegramPoll: telegramPollN,
+        },
       });
     }
   },

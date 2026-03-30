@@ -26,8 +26,8 @@ var CosConstants = {
    */
   TASK_DATETIME_DISPLAY_FORMAT: 'h:mm AM/PM, d mmmm yyyy',
 
-  /** 1-based column indexes matching TASK_HEADERS (Deadline … Updated At). */
-  DATETIME_DISPLAY_COLUMNS: Object.freeze([5, 9, 10, 13, 14]),
+  /** 1-based column indexes matching TASK_HEADERS (datetime-like cells). */
+  DATETIME_DISPLAY_COLUMNS: Object.freeze([5, 9, 10, 13, 14, 16, 17, 20]),
 
   TASK_HEADERS: Object.freeze([
     'Task ID',
@@ -44,7 +44,16 @@ var CosConstants = {
     'Notes',
     'Created At',
     'Updated At',
+    'Closure Status',
+    'Closure Requested At',
+    'Completion Timestamp',
+    'Miss Count',
+    'Last Outcome',
+    'Last Nudge At',
   ]),
+
+  /** First N columns equal pre-closure schema (for sheet migration). */
+  TASK_HEADERS_LEGACY_COLUMN_COUNT: 14,
 
   TASK_PRIORITY: Object.freeze({
     P0: 'P0',
@@ -59,7 +68,9 @@ var CosConstants = {
   TASK_STATUS: Object.freeze({
     PENDING: 'Pending',
     SCHEDULED: 'Scheduled',
+    AWAITING_CLOSURE: 'Awaiting Closure',
     DONE: 'Done',
+    DROPPED: 'Dropped',
     PAUSED: 'Paused',
     ERROR: 'Error',
     FOLLOW_UP: 'Follow-up',
@@ -68,19 +79,45 @@ var CosConstants = {
   TASK_STATUS_LIST: Object.freeze([
     'Pending',
     'Scheduled',
+    'Awaiting Closure',
     'Done',
+    'Dropped',
     'Paused',
     'Error',
     'Follow-up',
+  ]),
+
+  /** Sub-state while row is in the closure engine (sheet column). */
+  TASK_CLOSURE_STATUS: Object.freeze({
+    AWAITING: 'Awaiting',
+    RESOLVED: 'Resolved',
+  }),
+
+  TASK_CLOSURE_STATUS_LIST: Object.freeze(['Awaiting', 'Resolved']),
+
+  /** Most recent closure decision (sheet column). */
+  TASK_LAST_OUTCOME: Object.freeze({
+    DONE: 'Done',
+    RESCHEDULED: 'Rescheduled',
+    LOWERED: 'Lowered',
+    DROPPED: 'Dropped',
+  }),
+
+  TASK_LAST_OUTCOME_LIST: Object.freeze([
+    'Done',
+    'Rescheduled',
+    'Lowered',
+    'Dropped',
   ]),
 
   TASK_SOURCE: Object.freeze({
     MANUAL: 'Manual',
     EMAIL: 'Email',
     SYSTEM: 'System',
+    TELEGRAM: 'Telegram',
   }),
 
-  TASK_SOURCE_LIST: Object.freeze(['Manual', 'Email', 'System']),
+  TASK_SOURCE_LIST: Object.freeze(['Manual', 'Email', 'System', 'Telegram']),
 
   PROP_KEYS: Object.freeze({
     USER_EMAIL: 'USER_EMAIL',
@@ -113,9 +150,63 @@ var CosConstants = {
      * Default false: console only — one line per message in Executions.
      */
     DEBUG_VERBOSE: 'DEBUG_VERBOSE',
+    /** Full web app URL ending in /exec (Deploy → Web app). */
+    CLOSURE_WEBAPP_URL: 'CLOSURE_WEBAPP_URL',
+    /** HMAC secret for closure links; seeded on Install if missing. */
+    CLOSURE_LINK_SECRET: 'CLOSURE_LINK_SECRET',
+    /** Time trigger: every N min, sync Jeeves calendar event times → sheet. */
+    CALENDAR_SYNC_TRIGGER_ENABLED: 'CALENDAR_SYNC_TRIGGER_ENABLED',
+    /** Time trigger: hourly closure queue + optional stale recovery. */
+    CLOSURE_MAINTENANCE_TRIGGER_ENABLED: 'CLOSURE_MAINTENANCE_TRIGGER_ENABLED',
+    /** Auto-reschedule tasks stuck in Awaiting Closure past grace (Phase 3). */
+    CLOSURE_RECOVERY_RESCHEDULE_STALE: 'CLOSURE_RECOVERY_RESCHEDULE_STALE',
+    /** Hours after Closure Requested At before recovery runs (default 48). */
+    CLOSURE_RECOVERY_GRACE_HOURS: 'CLOSURE_RECOVERY_GRACE_HOURS',
+    /** From @BotFather; never commit. */
+    TELEGRAM_BOT_TOKEN: 'TELEGRAM_BOT_TOKEN',
+    /** Your numeric Telegram chat id (private chat with the bot). */
+    TELEGRAM_CHAT_ID: 'TELEGRAM_CHAT_ID',
+    /** When true, send a Telegram prompt when a block moves to Awaiting Closure. */
+    TELEGRAM_CLOSURE_ENABLED: 'TELEGRAM_CLOSURE_ENABLED',
+    /** When true, plain (non-reply) messages can create tasks via rule-based parser. */
+    TELEGRAM_TASK_CAPTURE_ENABLED: 'TELEGRAM_TASK_CAPTURE_ENABLED',
+    /** Query param cos_tg on webhook URL; Apps Script doPost cannot read custom headers. */
+    TELEGRAM_WEBHOOK_SECRET: 'TELEGRAM_WEBHOOK_SECRET',
+    /**
+     * When true, inbound Telegram uses getUpdates on a timer (Workspace-safe; no public web app POST).
+     */
+    TELEGRAM_USE_POLLING: 'TELEGRAM_USE_POLLING',
+    /** Next getUpdates offset (last processed update_id + 1). */
+    TELEGRAM_GET_UPDATES_OFFSET: 'TELEGRAM_GET_UPDATES_OFFSET',
   }),
 
-  SCHEMA_VERSION: '1',
+  /**
+   * Script Properties key: TGMP1_{chatId}_{messageId} → taskId (pending numeric reply).
+   */
+  TELEGRAM_PENDING_KEY_PREFIX: 'TGMP1_',
+
+  /** Signed closure links remain valid this many seconds (~45 days). */
+  CLOSURE_LINK_TTL_SECONDS: 45 * 24 * 60 * 60,
+
+  /**
+   * HMAC “action” for one-line calendar/digest links that open the closure menu page.
+   * Must not match real closure outcomes (done, reschedule, lower, drop).
+   */
+  CLOSURE_SIGN_ACTION_MENU: 'menu',
+
+  /**
+   * Popup reminder N minutes before the **start** of Jeeves calendar events (Calendar API limitation).
+   * Set to -1 to skip adding a reminder in code (your calendar default may still apply).
+   */
+  CALENDAR_JEEVES_POPUP_REMINDER_MINUTES_BEFORE_START: 10,
+
+  /**
+   * P0 tasks stuck in Awaiting Closure: auto-reschedule after this many hours when
+   * CLOSURE_RECOVERY_RESCHEDULE_STALE is true. Other priorities use CLOSURE_RECOVERY_GRACE_HOURS.
+   */
+  CLOSURE_RECOVERY_GRACE_HOURS_P0: 6,
+
+  SCHEMA_VERSION: '2',
 
   DEFAULT_GMAIL_LABEL_PROCESSED: '[Jeeves]/ok',
   DEFAULT_GMAIL_LABEL_ERROR: '[Jeeves]/err',
@@ -206,6 +297,18 @@ var CosConstants = {
   /** Time trigger: run Schedule pending on this hourly cadence (≥1). */
   TRIGGER_SCHEDULE_PENDING_EVERY_HOURS: 1,
 
+  /** Jeeves calendar → sheet time sync when CALENDAR_SYNC_TRIGGER_ENABLED. */
+  TRIGGER_CALENDAR_JEEVES_SYNC_EVERY_MINUTES: 15,
+
+  /**
+   * Time trigger: elapsed Scheduled → Awaiting Closure + stale recovery when
+   * CLOSURE_MAINTENANCE_TRIGGER_ENABLED. Apps Script allows 1, 5, 10, 15, 30.
+   */
+  TRIGGER_CLOSURE_MAINTENANCE_EVERY_MINUTES: 15,
+
+  /** Time trigger: Telegram getUpdates when TELEGRAM_USE_POLLING (allowed: 1, 5, 10, …). */
+  TRIGGER_TELEGRAM_POLL_EVERY_MINUTES: 1,
+
   SCHEDULING_HORIZON_DAYS: 21,
   SCHEDULING_SLOT_STEP_MINUTES: 15,
   SCHEDULE_TIME_MATCH_TOLERANCE_MS: 120000,
@@ -265,6 +368,12 @@ var CosConstants = {
     NOTES: 12,
     CREATED_AT: 13,
     UPDATED_AT: 14,
+    CLOSURE_STATUS: 15,
+    CLOSURE_REQUESTED_AT: 16,
+    COMPLETION_TIMESTAMP: 17,
+    MISS_COUNT: 18,
+    LAST_OUTCOME: 19,
+    LAST_NUDGE_AT: 20,
   }),
 };
 

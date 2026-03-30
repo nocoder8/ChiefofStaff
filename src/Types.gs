@@ -12,7 +12,7 @@
  * @property {string} durationMin
  * @property {string} deadline
  * @property {string} status
- * @property {string} source
+ * @property {string} source Manual | Email | System | Telegram
  * @property {string} sourceRef
  * @property {string} scheduledStart
  * @property {string} scheduledEnd
@@ -20,6 +20,12 @@
  * @property {string} notes
  * @property {string} createdAt
  * @property {string} updatedAt
+ * @property {string} closureStatus Awaiting | Resolved | ''
+ * @property {string} closureRequestedAt
+ * @property {string} completionTimestamp
+ * @property {string} missCount
+ * @property {string} lastOutcome Done | Rescheduled | Lowered | Dropped | ''
+ * @property {string} lastNudgeAt
  * @property {number} rowNumber 1-based sheet row when loaded from the sheet
  */
 
@@ -50,6 +56,12 @@
  * @property {string} [scheduledEnd]
  * @property {string} [calendarEventId]
  * @property {string} [notes]
+ * @property {string} [closureStatus]
+ * @property {string|Date} [closureRequestedAt]
+ * @property {string|Date} [completionTimestamp]
+ * @property {number|string} [missCount]
+ * @property {string} [lastOutcome]
+ * @property {string|Date} [lastNudgeAt]
  */
 
 /**
@@ -87,12 +99,24 @@
  * @property {string} digestAiModel optional override
  * @property {boolean} scheduleSummaryEmailEnabled
  * @property {boolean} schedulePendingTriggerEnabled
+ * @property {boolean} calendarSyncTriggerEnabled  Jeeves event times → sheet on a timer.
  * @property {boolean} debugVerbose  Both Logger + console when true (see DEBUG_VERBOSE property).
  * @property {string} gmailTaskQuery
  * @property {string} gmailLabelProcessed
  * @property {string} gmailLabelError
  * @property {string} [installedAtIso]
  * @property {string} [installVersion]
+ * @property {string} closureWebAppUrl
+ * @property {string} closureLinkSecret
+ * @property {boolean} closureMaintenanceTriggerEnabled
+ * @property {boolean} closureRecoveryRescheduleStale
+ * @property {number} closureRecoveryGraceHours
+ * @property {string} telegramBotToken
+ * @property {string} telegramChatId
+ * @property {boolean} telegramClosureEnabled
+ * @property {boolean} telegramTaskCaptureEnabled
+ * @property {string} telegramWebhookSecret  Validated via cos_tg query on webhook POST.
+ * @property {boolean} telegramUsePolling  When true, use getUpdates timer instead of webhook POST.
  */
 
 /**

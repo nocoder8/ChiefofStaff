@@ -2,6 +2,96 @@
  * Schedules Pending tasks into the primary calendar within work hours (Phase 3).
  */
 var CosTaskSchedulerService = {
+  /** Notes tag: do not schedule before start of this local calendar day (sheet TZ). */
+  JEEVES_DEFER_NOTE_RE: /\[Jeeves defer:\d{4}-\d{2}-\d{2}\]/g,
+
+  /**
+   * @param {string} notes
+   * @returns {string}
+   */
+  stripJeevesDeferTagsFromNotes_: function (notes) {
+    var s = String(notes || '').replace(
+      CosTaskSchedulerService.JEEVES_DEFER_NOTE_RE,
+      ''
+    );
+    s = s.replace(/\n{3,}/g, '\n\n').replace(/^\s+|\s+$/g, '');
+    return s;
+  },
+
+  /**
+   * @param {string} notes
+   * @param {string} ymd yyyy-MM-dd
+   * @returns {string}
+   */
+  appendJeevesDeferTagToNotes_: function (notes, ymd) {
+    var base = CosTaskSchedulerService.stripJeevesDeferTagsFromNotes_(notes);
+    var tag = '[Jeeves defer:' + ymd + ']';
+    return base ? base + '\n' + tag : tag;
+  },
+
+  /**
+   * Local calendar date yyyy-MM-dd approx. N×24h from now in IANA tz (N ≥ 1).
+   * @param {string} tz
+   * @param {number} dayCount 1 = tomorrow, 2 = day after, etc.
+   * @returns {string}
+   */
+  localDateYmdPlusDaysFromNow_: function (tz, dayCount) {
+    var z = String(tz || '').trim() || Session.getScriptTimeZone();
+    var n = Math.max(1, Math.floor(Number(dayCount)) || 1);
+    var ms = new Date().getTime() + n * 24 * 60 * 60 * 1000;
+    return Utilities.formatDate(new Date(ms), z, 'yyyy-MM-dd');
+  },
+
+  /**
+   * Next calendar date (approx. +24h) in IANA tz, yyyy-MM-dd.
+   * @param {string} tz
+   * @returns {string}
+   */
+  nextLocalTomorrowYmd_: function (tz) {
+    return CosTaskSchedulerService.localDateYmdPlusDaysFromNow_(tz, 1);
+  },
+
+  /**
+   * @param {string} notes
+   * @returns {string|null} yyyy-MM-dd
+   */
+  extractDeferYmdFromNotes_: function (notes) {
+    var m = /\[Jeeves defer:(\d{4}-\d{2}-\d{2})\]/.exec(String(notes || ''));
+    return m ? m[1] : null;
+  },
+
+  /**
+   * Earliest instant that falls on ymd in tz (15-min scan).
+   * @param {string} ymd
+   * @param {string} tz
+   * @returns {Date|null}
+   * @private
+   */
+  _localDayStartForYmdInTz_: function (ymd, tz) {
+    var zone = String(tz || '').trim() || Session.getScriptTimeZone();
+    var t = new Date().getTime() - 36 * 3600000;
+    var end = new Date().getTime() + 400 * 24 * 3600000;
+    var step = 15 * 60 * 1000;
+    var first = null;
+    while (t <= end) {
+      if (Utilities.formatDate(new Date(t), zone, 'yyyy-MM-dd') === ymd) {
+        first = t;
+        break;
+      }
+      t += step;
+    }
+    if (first === null) {
+      return null;
+    }
+    while (
+      first - step >= 0 &&
+      Utilities.formatDate(new Date(first - step), zone, 'yyyy-MM-dd') === ymd
+    ) {
+      first -= step;
+    }
+    return new Date(first);
+  },
+
   /**
    * @param {GoogleAppsScript.Spreadsheet.Spreadsheet=} optSs
    * @returns {CosScheduleBatchResult}
@@ -388,12 +478,25 @@ var CosTaskSchedulerService = {
     var deadline = CosTaskSchedulerService._parseDeadline_(task.deadline);
     var delayH = CosTaskSchedulerService._priorityDelayHours_(task.priority);
     var minSlotStart = new Date(now.getTime() + delayH * 3600000);
+    var deferYmd = CosTaskSchedulerService.extractDeferYmdFromNotes_(task.notes);
+    if (deferYmd) {
+      var deferStart = CosTaskSchedulerService._localDayStartForYmdInTz_(
+        deferYmd,
+        tz
+      );
+      if (deferStart && !isNaN(deferStart.getTime())) {
+        if (deferStart.getTime() > minSlotStart.getTime()) {
+          minSlotStart = deferStart;
+        }
+      }
+    }
     CosSchedulingLog.log('earliest allowed slot start', {
       taskId: taskId,
       title: task.task,
       priority: task.priority,
       delayHours: delayH,
       minSlotStartIso: minSlotStart.toISOString(),
+      jeevesDeferYmd: deferYmd || '',
       deadline: task.deadline || '',
       durationMin: dur,
     });

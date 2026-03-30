@@ -73,6 +73,11 @@ CosSettingsRepository.prototype.getSettings = function () {
       keys.SCHEDULE_PENDING_TRIGGER_ENABLED,
       true
     ),
+    calendarSyncTriggerEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.CALENDAR_SYNC_TRIGGER_ENABLED,
+      true
+    ),
     debugVerbose: CosSettingsRepository._readBoolean(
       raw,
       keys.DEBUG_VERBOSE,
@@ -95,6 +100,61 @@ CosSettingsRepository.prototype.getSettings = function () {
     ),
     installedAtIso: raw[keys.INSTALLED_AT_ISO] || '',
     installVersion: raw[keys.INSTALL_VERSION] || '',
+    closureWebAppUrl: CosSettingsRepository._readString(
+      raw,
+      keys.CLOSURE_WEBAPP_URL,
+      ''
+    ),
+    closureLinkSecret: CosSettingsRepository._readString(
+      raw,
+      keys.CLOSURE_LINK_SECRET,
+      ''
+    ),
+    closureMaintenanceTriggerEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.CLOSURE_MAINTENANCE_TRIGGER_ENABLED,
+      false
+    ),
+    closureRecoveryRescheduleStale: CosSettingsRepository._readBoolean(
+      raw,
+      keys.CLOSURE_RECOVERY_RESCHEDULE_STALE,
+      false
+    ),
+    closureRecoveryGraceHours: CosSettingsRepository._readPositiveInt_(
+      raw,
+      keys.CLOSURE_RECOVERY_GRACE_HOURS,
+      48
+    ),
+    telegramBotToken: CosSettingsRepository._readString(
+      raw,
+      keys.TELEGRAM_BOT_TOKEN,
+      ''
+    ),
+    telegramChatId: CosSettingsRepository._readString(
+      raw,
+      keys.TELEGRAM_CHAT_ID,
+      ''
+    ),
+    telegramClosureEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.TELEGRAM_CLOSURE_ENABLED,
+      false
+    ),
+    telegramTaskCaptureEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.TELEGRAM_TASK_CAPTURE_ENABLED,
+      true
+    ),
+    telegramWebhookSecret: CosSettingsRepository._readString(
+      raw,
+      keys.TELEGRAM_WEBHOOK_SECRET,
+      ''
+    ),
+    telegramUsePolling: CosSettingsRepository._readBoolean(
+      raw,
+      keys.TELEGRAM_USE_POLLING,
+      false
+    ),
   };
 };
 
@@ -143,6 +203,9 @@ CosSettingsRepository.prototype.seedDefaultsIfMissing = function (
   if (existing[keys.SCHEDULE_PENDING_TRIGGER_ENABLED] === undefined) {
     patch[keys.SCHEDULE_PENDING_TRIGGER_ENABLED] = 'true';
   }
+  if (existing[keys.CALENDAR_SYNC_TRIGGER_ENABLED] === undefined) {
+    patch[keys.CALENDAR_SYNC_TRIGGER_ENABLED] = 'true';
+  }
   if (!existing[keys.DAILY_DIGEST_TIME]) {
     patch[keys.DAILY_DIGEST_TIME] = CosConstants.DEFAULT_DAILY_DIGEST_TIME;
   }
@@ -165,6 +228,34 @@ CosSettingsRepository.prototype.seedDefaultsIfMissing = function (
 
   if (!existing[keys.BOUND_SPREADSHEET_ID]) {
     patch[keys.BOUND_SPREADSHEET_ID] = spreadsheet.getId();
+  }
+
+  if (!existing[keys.CLOSURE_LINK_SECRET]) {
+    patch[keys.CLOSURE_LINK_SECRET] =
+      Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  }
+  if (existing[keys.CLOSURE_MAINTENANCE_TRIGGER_ENABLED] === undefined) {
+    patch[keys.CLOSURE_MAINTENANCE_TRIGGER_ENABLED] = 'false';
+  }
+  if (existing[keys.CLOSURE_RECOVERY_RESCHEDULE_STALE] === undefined) {
+    patch[keys.CLOSURE_RECOVERY_RESCHEDULE_STALE] = 'false';
+  }
+  if (!existing[keys.CLOSURE_RECOVERY_GRACE_HOURS]) {
+    patch[keys.CLOSURE_RECOVERY_GRACE_HOURS] = '48';
+  }
+
+  if (existing[keys.TELEGRAM_CLOSURE_ENABLED] === undefined) {
+    patch[keys.TELEGRAM_CLOSURE_ENABLED] = 'false';
+  }
+  if (existing[keys.TELEGRAM_TASK_CAPTURE_ENABLED] === undefined) {
+    patch[keys.TELEGRAM_TASK_CAPTURE_ENABLED] = 'true';
+  }
+  if (!existing[keys.TELEGRAM_WEBHOOK_SECRET]) {
+    patch[keys.TELEGRAM_WEBHOOK_SECRET] =
+      Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  }
+  if (existing[keys.TELEGRAM_USE_POLLING] === undefined) {
+    patch[keys.TELEGRAM_USE_POLLING] = 'false';
   }
 
   if (Object.keys(patch).length) {
@@ -215,4 +306,22 @@ CosSettingsRepository._readBoolean = function (raw, key, defaultValue) {
   if (s === 'true') return true;
   if (s === 'false') return false;
   return defaultValue;
+};
+
+/**
+ * @param {Object} raw
+ * @param {string} key
+ * @param {number} defaultValue
+ * @returns {number}
+ */
+CosSettingsRepository._readPositiveInt_ = function (raw, key, defaultValue) {
+  var v = raw[key];
+  if (v === undefined || v === null || v === '') {
+    return defaultValue;
+  }
+  var n = parseInt(String(v), 10);
+  if (isNaN(n) || n < 1) {
+    return defaultValue;
+  }
+  return n;
 };

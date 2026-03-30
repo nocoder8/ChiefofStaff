@@ -127,10 +127,12 @@ CosCalendarRepository.prototype.createTaskEvent = function (
       ? raw.substring(0, Math.max(0, budget - 1)) + '…'
       : raw;
   var fullTitle = prefix + safeTitle;
-  var desc =
-    'Jeeves / Chief of Staff taskId=' +
-    taskId +
-    '\nManaged by Chief of Staff (Google Sheet).';
+  var settings = new CosSettingsRepository().getSettings();
+  var desc = CosClosureLinkService.buildCalendarDescription(
+    taskId,
+    safeTitle,
+    settings
+  );
   var ev = this._cal.createEvent(fullTitle, start, end, {
     description: desc,
   });
@@ -139,6 +141,16 @@ CosCalendarRepository.prototype.createTaskEvent = function (
   } catch (colorErr) {
     CosLogger.warn('createTaskEvent: setColor failed', {
       error: String(colorErr),
+    });
+  }
+  try {
+    var rm = CosConstants.CALENDAR_JEEVES_POPUP_REMINDER_MINUTES_BEFORE_START;
+    if (rm >= 0) {
+      ev.addPopupReminder(rm);
+    }
+  } catch (remErr) {
+    CosLogger.warn('createTaskEvent: addPopupReminder failed', {
+      error: String(remErr),
     });
   }
   return ev;
@@ -157,5 +169,51 @@ CosCalendarRepository.prototype.getEventByIdIfExists = function (eventId) {
     return CalendarApp.getEventById(id);
   } catch (e) {
     return null;
+  }
+};
+
+/**
+ * Deletes a calendar event by id if it still exists (closure / reschedule paths).
+ * @param {string} eventId
+ * @returns {boolean} true if an event was deleted
+ */
+CosCalendarRepository.prototype.deleteEventByIdIfExists = function (eventId) {
+  var ev = this.getEventByIdIfExists(eventId);
+  if (!ev) {
+    return false;
+  }
+  try {
+    ev.deleteEvent();
+    return true;
+  } catch (e) {
+    CosLogger.warn('deleteEventByIdIfExists failed', {
+      error: String(e),
+    });
+    return false;
+  }
+};
+
+/**
+ * Updates event description (closure links refresh) if the event exists.
+ * @param {string} eventId
+ * @param {string} description
+ * @returns {boolean}
+ */
+CosCalendarRepository.prototype.setEventDescriptionIfExists = function (
+  eventId,
+  description
+) {
+  var ev = this.getEventByIdIfExists(eventId);
+  if (!ev) {
+    return false;
+  }
+  try {
+    ev.setDescription(String(description || ''));
+    return true;
+  } catch (e) {
+    CosLogger.warn('setEventDescriptionIfExists failed', {
+      error: String(e),
+    });
+    return false;
   }
 };

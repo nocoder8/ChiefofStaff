@@ -39,7 +39,7 @@ function menuInstallChiefOfStaff() {
         ' Triggers: ' +
         (tr.installed.length
           ? tr.installed.join(' · ')
-          : 'none (enable EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, or keep schedule trigger on).');
+          : 'none (enable EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, CALENDAR_SYNC_TRIGGER_ENABLED, CLOSURE_MAINTENANCE_TRIGGER_ENABLED, TELEGRAM_USE_POLLING, or schedule trigger).');
     } else {
       msg += ' Triggers failed — ' + (tr.message || 'unknown') + ' (use Sync time triggers).';
     }
@@ -227,7 +227,7 @@ function menuSyncTimeTriggers() {
     var msg = r.ok
       ? r.installed.length
         ? 'Triggers: ' + r.installed.join(' · ')
-        : 'No triggers (see EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, SCHEDULE_PENDING_TRIGGER_ENABLED).'
+        : 'No triggers (see EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, SCHEDULE_PENDING_TRIGGER_ENABLED, CALENDAR_SYNC_TRIGGER_ENABLED, CLOSURE_MAINTENANCE_TRIGGER_ENABLED, TELEGRAM_USE_POLLING).'
       : 'Trigger sync failed: ' + (r.message || 'unknown');
     ss.toast(msg, CosConstants.PRODUCT_NAME, 14);
     CosLogger.info('menuSyncTimeTriggers', r);
@@ -383,6 +383,36 @@ function menuScheduleSelectedTask() {
   }
 }
 
+/**
+ * Chief of Staff → Sync Jeeves calendar → sheet (manual; same logic as time trigger)
+ */
+function menuSyncJeevesCalendarToSheet() {
+  var ss = CosBootstrap.getSpreadsheetForRun();
+  if (!ss) {
+    CosLogger.error('menuSyncJeevesCalendarToSheet: no spreadsheet');
+    return;
+  }
+  try {
+    var r = CosCalendarJeevesSyncService.syncJeevesEventsFromCalendar(ss);
+    var msg = !r.ok
+      ? 'Calendar sync failed.'
+      : 'Jeeves sync: ' +
+        r.timeUpdated +
+        ' row(s) updated' +
+        (r.revertedToScheduled
+          ? ' (' + r.revertedToScheduled + ' back to Scheduled)'
+          : '') +
+        ' · ' +
+        r.scanned +
+        ' linked row(s) scanned.';
+    ss.toast(msg, CosConstants.PRODUCT_NAME, 12);
+    CosLogger.info('menuSyncJeevesCalendarToSheet', r);
+  } catch (e) {
+    CosLogger.error('menuSyncJeevesCalendarToSheet', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
 // --- Time-driven triggers ---
 
 /**
@@ -402,6 +432,49 @@ function cos_triggerProcessGmail_() {
   } catch (e) {
     CosLogger.error('cos_triggerProcessGmail_', { error: String(e) });
   }
+}
+
+/**
+ * Every TRIGGER_CLOSURE_MAINTENANCE_EVERY_MINUTES: elapsed → Awaiting Closure + optional stale recovery
+ * (Script Property CLOSURE_MAINTENANCE_TRIGGER_ENABLED).
+ */
+function cos_triggerClosureMaintenance_() {
+  try {
+    var q = CosTaskClosureService.processElapsedScheduledIntoClosure();
+    var r = CosTaskClosureService.runStaleClosureRecovery();
+    CosLogger.info('cos_triggerClosureMaintenance_', { queue: q, recovery: r });
+  } catch (e) {
+    CosLogger.error('cos_triggerClosureMaintenance_', { error: String(e) });
+  }
+}
+
+/**
+ * Every 15 min (when CALENDAR_SYNC_TRIGGER_ENABLED): Jeeves calendar event times → Tasks sheet;
+ * Awaiting Closure + event end moved to future → back to Scheduled.
+ */
+function cos_triggerCalendarJeevesSync_() {
+  try {
+    var s = CosCalendarJeevesSyncService.syncJeevesEventsFromCalendar();
+    CosLogger.info('cos_triggerCalendarJeevesSync_', s);
+  } catch (e) {
+    CosLogger.error('cos_triggerCalendarJeevesSync_', { error: String(e) });
+  }
+}
+
+/**
+ * Time-driven: Telegram getUpdates when TELEGRAM_USE_POLLING and closure/capture are on.
+ */
+function cos_triggerTelegramPoll_() {
+  try {
+    CosTelegramPolling.runOnce_();
+  } catch (e) {
+    CosLogger.error('cos_triggerTelegramPoll_', { error: String(e) });
+  }
+}
+
+/** @deprecated Use cos_triggerClosureMaintenance_ (same behavior). */
+function cos_triggerProcessTaskClosure_() {
+  cos_triggerClosureMaintenance_();
 }
 
 /**
@@ -474,6 +547,370 @@ function menuDisableDigestAi() {
 }
 
 /**
+ * Chief of Staff → Process closure queue (elapsed Scheduled → Awaiting Closure)
+ */
+function menuProcessTaskClosureQueue() {
+  var ss = CosBootstrap.getSpreadsheetForRun();
+  if (!ss) {
+    CosLogger.error('menuProcessTaskClosureQueue: no spreadsheet');
+    return;
+  }
+  try {
+    var r = CosTaskClosureService.processElapsedScheduledIntoClosure(ss);
+    var rec = CosTaskClosureService.runStaleClosureRecovery(ss);
+    var msg = !r.ok
+      ? 'Closure queue failed: ' + (r.message || '')
+      : 'Closure: ' +
+        r.transitioned +
+        ' → Awaiting · ' +
+        r.skipped +
+        ' skipped · recovery: ' +
+        (rec.recovered || 0) +
+        ' auto-rescheduled.';
+    ss.toast(msg, CosConstants.PRODUCT_NAME, 12);
+    CosLogger.info('menuProcessTaskClosureQueue', { queue: r, recovery: rec });
+  } catch (e) {
+    CosLogger.error('menuProcessTaskClosureQueue', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Set closure web app URL (Script Property CLOSURE_WEBAPP_URL)
+ */
+function menuSetClosureWebAppUrl() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuSetClosureWebAppUrl: no active spreadsheet');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt(
+    'Closure web app URL',
+    'Paste the Web app URL from Deploy → Manage deployments (must end with /exec).\n' +
+      'Anyone with a signed link can apply closure while the link is valid.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  var url = response.getResponseText().toString().replace(/^\s+|\s+$/g, '');
+  if (!url) {
+    ss.toast('No URL entered.', CosConstants.PRODUCT_NAME, 6);
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.CLOSURE_WEBAPP_URL,
+    url
+  );
+  ss.toast(
+    'CLOSURE_WEBAPP_URL saved. Re-register the Telegram webhook if you use Telegram closure.',
+    CosConstants.PRODUCT_NAME,
+    10
+  );
+  CosLogger.info('CLOSURE_WEBAPP_URL updated');
+}
+
+/**
+ * Chief of Staff → Set Telegram bot token (TELEGRAM_BOT_TOKEN)
+ */
+function menuSetTelegramBotToken() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuSetTelegramBotToken: no active spreadsheet');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt(
+    'Telegram bot token',
+    'Paste the token from @BotFather. Stored only in Script Properties.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  var tok = response.getResponseText().toString().replace(/^\s+|\s+$/g, '');
+  if (!tok) {
+    ss.toast('No token entered.', CosConstants.PRODUCT_NAME, 6);
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_BOT_TOKEN,
+    tok
+  );
+  ss.toast('Telegram bot token saved.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Set Telegram chat id (TELEGRAM_CHAT_ID)
+ */
+function menuSetTelegramChatId() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuSetTelegramChatId: no active spreadsheet');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt(
+    'Telegram chat id',
+    'Your numeric chat id (e.g. message @userinfobot). Private chat: usually your user id.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  var id = response.getResponseText().toString().replace(/^\s+|\s+$/g, '');
+  if (!id) {
+    ss.toast('No chat id entered.', CosConstants.PRODUCT_NAME, 6);
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_CHAT_ID,
+    id
+  );
+  ss.toast('Telegram chat id saved.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Enable Telegram closure nudges
+ */
+function menuEnableTelegramClosure() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_CLOSURE_ENABLED,
+    'true'
+  );
+  ss.toast(
+    'Telegram closure enabled. Set token + chat id, deploy web app, then Register Telegram webhook.',
+    CosConstants.PRODUCT_NAME,
+    12
+  );
+}
+
+/**
+ * Chief of Staff → Disable Telegram closure nudges
+ */
+function menuDisableTelegramClosure() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_CLOSURE_ENABLED,
+    'false'
+  );
+  ss.toast('Telegram closure disabled.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Enable Telegram task capture (plain messages → new Tasks rows)
+ */
+function menuEnableTelegramTaskCapture() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_TASK_CAPTURE_ENABLED,
+    'true'
+  );
+  ss.toast('Telegram task capture enabled.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Disable Telegram task capture
+ */
+function menuDisableTelegramTaskCapture() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_TASK_CAPTURE_ENABLED,
+    'false'
+  );
+  ss.toast('Telegram task capture disabled.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Log Telegram task capture parser self-test (Executions)
+ */
+function menuTelegramCaptureParserSelfTest() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet() || CosBootstrap.getSpreadsheetForRun();
+  var r = CosTelegramTaskCaptureParser.runSelfTest();
+  var msg =
+    'Parser self-test: ' + r.passed + ' passed, ' + r.failed + ' failed.';
+  if (ss) {
+    ss.toast(msg + ' See Executions for details.', CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Enable Telegram polling (getUpdates on a timer; works without public web app POST).
+ */
+function menuEnableTelegramPolling() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var k = CosConstants.PROP_KEYS;
+    props.setProperty(k.TELEGRAM_USE_POLLING, 'true');
+    props.deleteProperty(k.TELEGRAM_GET_UPDATES_OFFSET);
+    var settings = new CosSettingsRepository().getSettings();
+    var dw = CosTelegramService.deleteWebhook_(settings);
+    var tz = ss.getSpreadsheetTimeZone();
+    var r = CosTriggerService.syncFromSettings(settings, tz);
+    var parts = ['Telegram polling enabled.'];
+    if (!dw.ok) {
+      parts.push('deleteWebhook: ' + (dw.message || 'failed') + ' (check token).');
+    }
+    if (!r.ok) {
+      parts.push('Triggers: ' + (r.message || 'sync failed') + ' — run Sync time triggers.');
+    } else {
+      parts.push(
+        r.installed && r.installed.length
+          ? 'Triggers: ' + r.installed.join(' · ')
+          : 'Run Sync time triggers if no poll trigger listed.'
+      );
+    }
+    ss.toast(parts.join(' '), CosConstants.PRODUCT_NAME, 14);
+    CosLogger.info('menuEnableTelegramPolling', { dw: dw, triggers: r });
+  } catch (e) {
+    CosLogger.error('menuEnableTelegramPolling', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Disable Telegram polling (use webhook again after admin allows public web app).
+ */
+function menuDisableTelegramPolling() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  try {
+    PropertiesService.getScriptProperties().setProperty(
+      CosConstants.PROP_KEYS.TELEGRAM_USE_POLLING,
+      'false'
+    );
+    var settings = new CosSettingsRepository().getSettings();
+    var r = CosTriggerService.syncFromSettings(
+      settings,
+      ss.getSpreadsheetTimeZone()
+    );
+    ss.toast(
+      r.ok
+        ? 'Telegram polling off. Re-register webhook if you use public web app POST.'
+        : 'Polling off; trigger sync failed — run Sync time triggers.',
+      CosConstants.PRODUCT_NAME,
+      12
+    );
+    CosLogger.info('menuDisableTelegramPolling', r);
+  } catch (e) {
+    CosLogger.error('menuDisableTelegramPolling', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Register Telegram webhook (same web app URL as closure links)
+ */
+function menuRegisterTelegramWebhook() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  try {
+    var settings = new CosSettingsRepository().getSettings();
+    var r = CosTelegramService.setWebhookFromSettings_(settings);
+    ss.toast(
+      r.ok
+        ? 'Telegram webhook registered. Send a test message from the bot chat.'
+        : r.message || 'setWebhook failed',
+      CosConstants.PRODUCT_NAME,
+      12
+    );
+    CosLogger.info('menuRegisterTelegramWebhook', r);
+  } catch (e) {
+    CosLogger.error('menuRegisterTelegramWebhook', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Log Telegram webhook status (getWebhookInfo → Executions)
+ */
+function menuLogTelegramWebhookInfo() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  try {
+    var settings = new CosSettingsRepository().getSettings();
+    var r = CosTelegramService.fetchWebhookInfo_(settings);
+    if (!r.ok) {
+      ss.toast(r.message || 'getWebhookInfo failed', CosConstants.PRODUCT_NAME, 10);
+      CosLogger.warn('menuLogTelegramWebhookInfo', r);
+      return;
+    }
+    var res = r.result || {};
+    var whBase = CosTelegramService._execUrlWithoutQuery_(res.url);
+    var propBase = CosTelegramService._execUrlWithoutQuery_(
+      settings.closureWebAppUrl || ''
+    );
+    CosLogger.info('Telegram getWebhookInfo', {
+      url: CosTelegramService._redactCosTgInUrl_(res.url),
+      pending_update_count: res.pending_update_count,
+      last_error_date: res.last_error_date,
+      last_error_message: res.last_error_message,
+      allowed_updates: res.allowed_updates,
+    });
+    CosLogger.info('Telegram webhook vs CLOSURE_WEBAPP_URL', {
+      webhookExecUrl: whBase,
+      propertyExecUrl: propBase,
+      basesMatch: whBase === propBase && whBase.length > 0,
+    });
+    ss.toast(
+      'Webhook status logged. Open Executions → latest run for details.',
+      CosConstants.PRODUCT_NAME,
+      12
+    );
+  } catch (e) {
+    CosLogger.error('menuLogTelegramWebhookInfo', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Send Telegram test message
+ */
+function menuSendTelegramTest() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  try {
+    var settings = new CosSettingsRepository().getSettings();
+    var r = CosTelegramService.sendTestMessage_(settings);
+    ss.toast(
+      r.ok ? 'Telegram test sent.' : r.message || 'Failed',
+      CosConstants.PRODUCT_NAME,
+      10
+    );
+    CosLogger.info('menuSendTelegramTest', r);
+  } catch (e) {
+    CosLogger.error('menuSendTelegramTest', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
  * Chief of Staff → Send daily digest now (test email; ignores DAILY_DIGEST_ENABLED; can send multiple/day).
  */
 function menuSendDailyDigestNow() {
@@ -519,11 +956,26 @@ var CosMainMenu = {
       .addItem('Process Gmail → Tasks', 'menuProcessGmailInbox')
       .addSeparator()
       .addItem('Send daily digest now (email)', 'menuSendDailyDigestNow')
+      .addItem('Process closure queue (+ recovery)', 'menuProcessTaskClosureQueue')
+      .addItem('Set closure web app URL…', 'menuSetClosureWebAppUrl')
+      .addItem('Set Telegram bot token…', 'menuSetTelegramBotToken')
+      .addItem('Set Telegram chat id…', 'menuSetTelegramChatId')
+      .addItem('Enable Telegram closure nudges', 'menuEnableTelegramClosure')
+      .addItem('Disable Telegram closure nudges', 'menuDisableTelegramClosure')
+      .addItem('Enable Telegram task capture', 'menuEnableTelegramTaskCapture')
+      .addItem('Disable Telegram task capture', 'menuDisableTelegramTaskCapture')
+      .addItem('Log: Telegram capture parser self-test', 'menuTelegramCaptureParserSelfTest')
+      .addItem('Enable Telegram polling (no public web app)', 'menuEnableTelegramPolling')
+      .addItem('Disable Telegram polling', 'menuDisableTelegramPolling')
+      .addItem('Register Telegram webhook', 'menuRegisterTelegramWebhook')
+      .addItem('Log: Telegram webhook status (getWebhookInfo)', 'menuLogTelegramWebhookInfo')
+      .addItem('Send Telegram test', 'menuSendTelegramTest')
       .addItem('Set digest AI API key…', 'menuSetDigestAiApiKey')
       .addItem('Turn off digest AI', 'menuDisableDigestAi')
       .addSeparator()
       .addItem('Schedule pending tasks', 'menuSchedulePendingTasks')
       .addItem('Schedule selected task (row)', 'menuScheduleSelectedTask')
+      .addItem('Sync Jeeves calendar → sheet', 'menuSyncJeevesCalendarToSheet')
       .addSeparator()
       .addItem('Run system health check', 'menuRunSystemHealthCheck')
       .addItem('Log settings (script editor logs)', 'menuLogSettings');

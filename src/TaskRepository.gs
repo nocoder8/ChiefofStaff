@@ -140,6 +140,58 @@ CosTaskRepository._isValidSource_ = function (s) {
 };
 
 /**
+ * @param {*} s
+ * @returns {boolean} true for empty (clear) or allowed list value
+ */
+CosTaskRepository._isValidClosureStatusValue_ = function (s) {
+  var t = String(s === undefined || s === null ? '' : s).trim();
+  if (!t) {
+    return true;
+  }
+  return CosConstants.TASK_CLOSURE_STATUS_LIST.indexOf(t) >= 0;
+};
+
+/**
+ * @param {*} s
+ * @returns {boolean}
+ */
+CosTaskRepository._isValidLastOutcomeValue_ = function (s) {
+  var t = String(s === undefined || s === null ? '' : s).trim();
+  if (!t) {
+    return true;
+  }
+  return CosConstants.TASK_LAST_OUTCOME_LIST.indexOf(t) >= 0;
+};
+
+/**
+ * @param {*} cell
+ * @returns {string}
+ */
+CosTaskRepository._missCountFromCell_ = function (cell) {
+  if (cell === '' || cell === null || cell === undefined) {
+    return '0';
+  }
+  if (typeof cell === 'number' && !isNaN(cell)) {
+    var rn = Math.round(cell);
+    return String(rn < 0 ? 0 : rn);
+  }
+  var n = parseInt(String(cell), 10);
+  return isNaN(n) || n < 0 ? '0' : String(n);
+};
+
+/**
+ * @param {*} raw
+ * @returns {number} non-negative int for sheet cell
+ */
+CosTaskRepository._missCountToCell_ = function (raw) {
+  var n = parseInt(String(raw === undefined || raw === null ? '0' : raw).trim(), 10);
+  if (isNaN(n) || n < 0) {
+    return 0;
+  }
+  return n;
+};
+
+/**
  * @param {Date|string|undefined|null} v
  * @returns {Date|string}
  */
@@ -261,6 +313,12 @@ CosTaskRepository.prototype._rowValuesToTask_ = function (values, rowNumber) {
     notes: CosTaskRepository._formatCellDisplay_(v[11]),
     createdAt: CosTaskRepository._formatCellDisplay_(v[12]),
     updatedAt: CosTaskRepository._formatCellDisplay_(v[13]),
+    closureStatus: CosTaskRepository._formatCellDisplay_(v[14]),
+    closureRequestedAt: CosTaskRepository._formatCellDisplay_(v[15]),
+    completionTimestamp: CosTaskRepository._formatCellDisplay_(v[16]),
+    missCount: CosTaskRepository._missCountFromCell_(v[17]),
+    lastOutcome: CosTaskRepository._formatCellDisplay_(v[18]),
+    lastNudgeAt: CosTaskRepository._formatCellDisplay_(v[19]),
     rowNumber: rowNumber,
   };
 };
@@ -287,6 +345,16 @@ CosTaskRepository.prototype._taskToRowValues_ = function (task) {
     task.notes,
     CosTaskRepository._parseToSheetDate_(task.createdAt),
     CosTaskRepository._parseToSheetDate_(task.updatedAt),
+    task.closureStatus === undefined || task.closureStatus === null
+      ? ''
+      : String(task.closureStatus).trim(),
+    CosTaskRepository._parseToSheetDate_(task.closureRequestedAt),
+    CosTaskRepository._parseToSheetDate_(task.completionTimestamp),
+    CosTaskRepository._missCountToCell_(task.missCount),
+    task.lastOutcome === undefined || task.lastOutcome === null
+      ? ''
+      : String(task.lastOutcome).trim(),
+    CosTaskRepository._parseToSheetDate_(task.lastNudgeAt),
   ];
 };
 
@@ -328,9 +396,45 @@ CosTaskRepository.prototype._requireSheet_ = function () {
  */
 CosTaskRepository.prototype.ensureSchema = function () {
   var sheet = this._getOrCreateTasksSheet_();
+  this._migrateTaskSheetToV2IfNeeded_(sheet);
   this._ensureCanonicalHeaders_(sheet);
   this._applyValidations_(sheet);
   this._freezeHeaderRow_(sheet);
+};
+
+/**
+ * Expands a 14-column Tasks sheet to include closure columns (schema v2).
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @private
+ */
+CosTaskRepository.prototype._migrateTaskSheetToV2IfNeeded_ = function (sheet) {
+  var expected = CosConstants.TASK_HEADERS;
+  var nLegacy = CosConstants.TASK_HEADERS_LEGACY_COLUMN_COUNT;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol >= expected.length) {
+    return;
+  }
+  if (lastCol !== nLegacy) {
+    return;
+  }
+  var header = sheet
+    .getRange(1, 1, 1, nLegacy)
+    .getValues()[0]
+    .map(function (c) {
+      return String(c).trim();
+    });
+  var wantLegacy = expected.slice(0, nLegacy);
+  var i;
+  for (i = 0; i < nLegacy; i++) {
+    if (header[i] !== wantLegacy[i]) {
+      return;
+    }
+  }
+  sheet.getRange(1, 1, 1, expected.length).setValues([expected.slice()]);
+  CosLogger.info('Tasks sheet migrated to closure schema', {
+    fromCols: nLegacy,
+    toCols: expected.length,
+  });
 };
 
 /**
@@ -506,6 +610,8 @@ CosTaskRepository.prototype._applyValidations_ = function (sheet) {
   var priorityCol = CosConstants.COL.PRIORITY;
   var statusCol = CosConstants.COL.STATUS;
   var sourceCol = CosConstants.COL.SOURCE;
+  var closureCol = CosConstants.COL.CLOSURE_STATUS;
+  var outcomeCol = CosConstants.COL.LAST_OUTCOME;
 
   var priorityRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(CosConstants.TASK_PRIORITY_LIST, true)
@@ -520,6 +626,16 @@ CosTaskRepository.prototype._applyValidations_ = function (sheet) {
   var sourceRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(CosConstants.TASK_SOURCE_LIST, true)
     .setAllowInvalid(false)
+    .build();
+
+  var closureRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CosConstants.TASK_CLOSURE_STATUS_LIST, true)
+    .setAllowInvalid(true)
+    .build();
+
+  var outcomeRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CosConstants.TASK_LAST_OUTCOME_LIST, true)
+    .setAllowInvalid(true)
     .build();
 
   if (dataRegionNumRows > 0) {
@@ -541,6 +657,18 @@ CosTaskRepository.prototype._applyValidations_ = function (sheet) {
       dataRegionNumRows,
       sourceCol
     ).setDataValidation(sourceRule);
+    CosTaskRepository._sheetRangeOneColumn_(
+      sheet,
+      start,
+      dataRegionNumRows,
+      closureCol
+    ).setDataValidation(closureRule);
+    CosTaskRepository._sheetRangeOneColumn_(
+      sheet,
+      start,
+      dataRegionNumRows,
+      outcomeCol
+    ).setDataValidation(outcomeRule);
   }
 
   this._applyDateTimeDisplayFormats_(sheet);
@@ -680,6 +808,12 @@ CosTaskRepository.prototype.createTask = function (input) {
       notes: input.notes ? String(input.notes).trim() : '',
       createdAt: now,
       updatedAt: now,
+      closureStatus: '',
+      closureRequestedAt: '',
+      completionTimestamp: '',
+      missCount: '0',
+      lastOutcome: '',
+      lastNudgeAt: '',
       rowNumber: 0,
     };
 
@@ -764,6 +898,61 @@ CosTaskRepository.prototype.updateTask = function (taskId, patch) {
     }
     if (patch.notes !== undefined) {
       task.notes = CosTaskRepository._patchString_(patch.notes);
+    }
+    if (patch.closureStatus !== undefined) {
+      task.closureStatus = CosTaskRepository._isValidClosureStatusValue_(
+        patch.closureStatus
+      )
+        ? CosTaskRepository._patchString_(patch.closureStatus)
+        : task.closureStatus;
+    }
+    if (patch.closureRequestedAt !== undefined) {
+      if (patch.closureRequestedAt === '' || patch.closureRequestedAt === null) {
+        task.closureRequestedAt = '';
+      } else {
+        var crd = CosTaskRepository._parseToSheetDate_(patch.closureRequestedAt);
+        task.closureRequestedAt =
+          crd === '' ? '' : CosTaskRepository._formatCellDisplay_(crd);
+      }
+    }
+    if (patch.completionTimestamp !== undefined) {
+      if (patch.completionTimestamp === '') {
+        task.completionTimestamp = '';
+      } else {
+        var cts = CosTaskRepository._parseToSheetDate_(patch.completionTimestamp);
+        task.completionTimestamp =
+          cts === '' ? '' : CosTaskRepository._formatCellDisplay_(cts);
+      }
+    }
+    if (patch.missCount !== undefined) {
+      task.missCount = String(CosTaskRepository._missCountToCell_(patch.missCount));
+    }
+    if (patch.lastOutcome !== undefined) {
+      task.lastOutcome = CosTaskRepository._isValidLastOutcomeValue_(
+        patch.lastOutcome
+      )
+        ? CosTaskRepository._patchString_(patch.lastOutcome)
+        : task.lastOutcome;
+    }
+    if (patch.lastNudgeAt !== undefined) {
+      if (patch.lastNudgeAt === '') {
+        task.lastNudgeAt = '';
+      } else {
+        var lna = CosTaskRepository._parseToSheetDate_(patch.lastNudgeAt);
+        task.lastNudgeAt =
+          lna === '' ? '' : CosTaskRepository._formatCellDisplay_(lna);
+      }
+    }
+    if (
+      task.status === CosConstants.TASK_STATUS.SCHEDULED &&
+      String(task.scheduledStart || '').trim()
+    ) {
+      var strippedNotes = CosTaskSchedulerService.stripJeevesDeferTagsFromNotes_(
+        task.notes || ''
+      );
+      if (strippedNotes !== task.notes) {
+        task.notes = strippedNotes;
+      }
     }
     task.updatedAt = CosTaskRepository._nowIso_();
     self._writeTaskAtRow_(sheet, found, task);
@@ -935,11 +1124,23 @@ CosTaskRepository.prototype._normalizeRowInPlace_ = function (row) {
     row[13] = new Date();
     changed = true;
   }
+  if (
+    row[17] === '' ||
+    row[17] === null ||
+    row[17] === undefined ||
+    (typeof row[17] === 'string' && String(row[17]).trim() === '')
+  ) {
+    row[17] = 0;
+    changed = true;
+  }
   CosTaskRepository._coerceSheetDatetimeCell_(row, 4);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 8);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 9);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 12);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 13);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 15);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 16);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 19);
   return changed;
 };
 
