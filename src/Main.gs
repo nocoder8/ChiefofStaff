@@ -736,6 +736,77 @@ function menuDisableTelegramTaskCapture() {
 }
 
 /**
+ * Chief of Staff → Enable LLM fallback for Telegram task capture (needs DIGEST_AI_API_KEY).
+ */
+function menuEnableTelegramParseAi() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  var props = PropertiesService.getScriptProperties();
+  var k = CosConstants.PROP_KEYS;
+  props.setProperty(k.TELEGRAM_PARSE_AI_ENABLED, 'true');
+  var hasKey =
+    String(props.getProperty(k.DIGEST_AI_API_KEY) || '').trim().length > 0;
+  ss.toast(
+    hasKey
+      ? 'Telegram parse AI enabled (uses digest AI key & model).'
+      : 'Flag on — set digest AI API key (menu or DIGEST_AI_API_KEY) or calls will skip the LLM.',
+    CosConstants.PRODUCT_NAME,
+    12
+  );
+}
+
+/**
+ * Chief of Staff → Disable LLM fallback for Telegram task capture
+ */
+function menuDisableTelegramParseAi() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_PARSE_AI_ENABLED,
+    'false'
+  );
+  ss.toast('Telegram parse AI disabled.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Enable conversational Telegram mode (butler replies + chat; uses LLM when enabled).
+ */
+function menuEnableTelegramConversationalMode() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_CONVERSATIONAL_MODE_ENABLED,
+    'true'
+  );
+  ss.toast(
+    'Conversational mode enabled for Telegram. (Tip: Enable Telegram parse AI + set digest AI key for best results.)',
+    CosConstants.PRODUCT_NAME,
+    12
+  );
+}
+
+/**
+ * Chief of Staff → Disable conversational Telegram mode
+ */
+function menuDisableTelegramConversationalMode() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosConstants.PROP_KEYS.TELEGRAM_CONVERSATIONAL_MODE_ENABLED,
+    'false'
+  );
+  ss.toast('Conversational mode disabled for Telegram.', CosConstants.PRODUCT_NAME, 10);
+}
+
+/**
  * Chief of Staff → Log Telegram task capture parser self-test (Executions)
  */
 function menuTelegramCaptureParserSelfTest() {
@@ -964,6 +1035,10 @@ var CosMainMenu = {
       .addItem('Disable Telegram closure nudges', 'menuDisableTelegramClosure')
       .addItem('Enable Telegram task capture', 'menuEnableTelegramTaskCapture')
       .addItem('Disable Telegram task capture', 'menuDisableTelegramTaskCapture')
+      .addItem('Enable Telegram parse AI (digest key)', 'menuEnableTelegramParseAi')
+      .addItem('Disable Telegram parse AI', 'menuDisableTelegramParseAi')
+      .addItem('Enable Telegram conversational mode', 'menuEnableTelegramConversationalMode')
+      .addItem('Disable Telegram conversational mode', 'menuDisableTelegramConversationalMode')
       .addItem('Log: Telegram capture parser self-test', 'menuTelegramCaptureParserSelfTest')
       .addItem('Enable Telegram polling (no public web app)', 'menuEnableTelegramPolling')
       .addItem('Disable Telegram polling', 'menuDisableTelegramPolling')

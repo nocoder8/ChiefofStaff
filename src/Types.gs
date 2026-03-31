@@ -117,6 +117,8 @@
  * @property {boolean} telegramTaskCaptureEnabled
  * @property {string} telegramWebhookSecret  Validated via cos_tg query on webhook POST.
  * @property {boolean} telegramUsePolling  When true, use getUpdates timer instead of webhook POST.
+ * @property {boolean} telegramParseAiEnabled  LLM fallback for Telegram task capture (uses digest AI key).
+ * @property {boolean} telegramConversationalModeEnabled  When true, LLM-first + butler-like replies + chat.
  */
 
 /**

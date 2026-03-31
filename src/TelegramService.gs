@@ -344,6 +344,613 @@ var CosTelegramService = {
   },
 
   /**
+   * @param {string} raw
+   * @param {number} nowMs
+   * @param {GoogleAppsScript.Properties.Properties} props
+   * @param {string} key
+   * @returns {Object|null}
+   * @private
+   */
+  _readTimedPending_: function (raw, nowMs, props, key) {
+    try {
+      var o = JSON.parse(raw);
+      if (!o || typeof o !== 'object' || typeof o.exp !== 'number') {
+        props.deleteProperty(key);
+        return null;
+      }
+      if (nowMs > o.exp) {
+        props.deleteProperty(key);
+        return null;
+      }
+      return o;
+    } catch (e) {
+      props.deleteProperty(key);
+      return null;
+    }
+  },
+
+  /**
+   * Lightweight per-chat context for conversational follow-ups (TTL).
+   * @param {string} chatStr
+   * @returns {Object} context object
+   * @private
+   */
+  _readChatContext_: function (chatStr) {
+    var props = PropertiesService.getScriptProperties();
+    var key = 'TGCTX1_' + String(chatStr || '').trim();
+    var raw = props.getProperty(key);
+    if (!raw) {
+      return {};
+    }
+    try {
+      var o = JSON.parse(raw);
+      if (!o || typeof o !== 'object') {
+        props.deleteProperty(key);
+        return {};
+      }
+      var exp = Number(o.exp || 0);
+      if (!exp || Date.now() > exp) {
+        props.deleteProperty(key);
+        return {};
+      }
+      return o.ctx && typeof o.ctx === 'object' ? o.ctx : {};
+    } catch (e) {
+      props.deleteProperty(key);
+      return {};
+    }
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {Object} ctx
+   * @param {number=} ttlMs
+   * @private
+   */
+  _writeChatContext_: function (chatStr, ctx, ttlMs) {
+    var props = PropertiesService.getScriptProperties();
+    var key = 'TGCTX1_' + String(chatStr || '').trim();
+    var ttl = Math.max(5 * 60 * 1000, Number(ttlMs) || 24 * 60 * 60 * 1000);
+    try {
+      props.setProperty(
+        key,
+        JSON.stringify({ exp: Date.now() + ttl, ctx: ctx || {} })
+      );
+    } catch (e) {
+      // ignore
+    }
+  },
+
+  /**
+   * @param {Object} p normalized LLM payload (single or business_day_split)
+   * @returns {Object|null}
+   * @private
+   */
+  _slimClarifyPayload_: function (p) {
+    if (!p || !p.kind) {
+      return null;
+    }
+    if (p.kind === 'single') {
+      return {
+        kind: 'single',
+        task: p.task,
+        priority: p.priority,
+        durationMin: p.durationMin,
+        notes: p.notes || '',
+      };
+    }
+    if (p.kind === 'business_day_split') {
+      return {
+        kind: 'business_day_split',
+        baseTitle: p.baseTitle,
+        minutesPerDay: p.minutesPerDay,
+        businessDayCount: p.businessDayCount,
+        startAnchor: p.startAnchor,
+        priority: p.priority,
+      };
+    }
+    return null;
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {Object} pay slim payload
+   * @param {CosSettings} settings
+   * @private
+   */
+  _applyClarifyChoicePayload_: function (chatStr, tok, pay, settings) {
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    if (!ss) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Spreadsheet not reachable. Open the Tasks sheet once or set BOUND_SPREADSHEET_ID and run Install.'
+      );
+      return;
+    }
+    if (pay.kind === 'single') {
+      CosTelegramService._createAndConfirmTelegramTask_(
+        chatStr,
+        tok,
+        ss,
+        {
+          task: pay.task,
+          priority: pay.priority,
+          durationMin: pay.durationMin,
+          notes: pay.notes || '',
+        },
+        '',
+        true
+      );
+      return;
+    }
+    if (pay.kind === 'business_day_split') {
+      CosTelegramService._handleBusinessDaySplit_(
+        chatStr,
+        tok,
+        {
+          ok: true,
+          baseTitle: pay.baseTitle,
+          minutesPerDay: pay.minutesPerDay,
+          businessDayCount: pay.businessDayCount,
+          startAnchor: pay.startAnchor,
+          priority: pay.priority,
+        },
+        ss
+      );
+    }
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {string} text
+   * @param {CosSettings} settings
+   * @returns {boolean} true if this message was consumed
+   * @private
+   */
+  _consumeTelegramPendingUi_: function (chatStr, tok, text, settings) {
+    var t = String(text || '').replace(/^\s+|\s+$/g, '');
+    var props = PropertiesService.getScriptProperties();
+    var now = Date.now();
+    var kCl = CosConstants.TELEGRAM_CLARIFY_PENDING_PREFIX + chatStr;
+    var kPk = CosConstants.TELEGRAM_TASK_PICK_PENDING_PREFIX + chatStr;
+    var rawCl = props.getProperty(kCl);
+    if (rawCl) {
+      var cl = CosTelegramService._readTimedPending_(rawCl, now, props, kCl);
+      if (!cl) {
+        return false;
+      }
+      if (!/^[1-3]$/.test(t)) {
+        return false;
+      }
+      var idx = parseInt(t, 10) - 1;
+      if (!cl.options || idx < 0 || idx >= cl.options.length) {
+        CosTelegramService._replyPlain_(chatStr, tok, 'Pick 1, 2, or 3.');
+        return true;
+      }
+      props.deleteProperty(kCl);
+      var pay = cl.options[idx];
+      CosTelegramService._applyClarifyChoicePayload_(chatStr, tok, pay, settings);
+      return true;
+    }
+    var rawPk = props.getProperty(kPk);
+    if (rawPk) {
+      var pk = CosTelegramService._readTimedPending_(rawPk, now, props, kPk);
+      if (!pk) {
+        return false;
+      }
+      if (!/^[1-5]$/.test(t)) {
+        return false;
+      }
+      var n = parseInt(t, 10) - 1;
+      if (!pk.candidates || n < 0 || n >= pk.candidates.length) {
+        CosTelegramService._replyPlain_(chatStr, tok, 'Pick a number from the list.');
+        return true;
+      }
+      props.deleteProperty(kPk);
+      var taskId = String(pk.candidates[n].taskId || '').trim();
+      if (pk.action === 'reschedule') {
+        CosTelegramService._executePickReschedule_(
+          chatStr,
+          tok,
+          taskId,
+          pk.targetYmd,
+          settings
+        );
+      } else if (pk.action === 'drop') {
+        CosTelegramService._executePickDrop_(chatStr, tok, taskId);
+      }
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {string} taskId
+   * @param {string} targetYmd
+   * @param {CosSettings} settings
+   * @private
+   */
+  _executePickReschedule_: function (chatStr, tok, taskId, targetYmd, settings) {
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(90000)) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'Busy — try again in a moment.');
+      return;
+    }
+    try {
+      var ss = CosBootstrap.getSpreadsheetForRun();
+      if (!ss) {
+        CosTelegramService._replyPlain_(chatStr, tok, 'Spreadsheet not reachable.');
+        return;
+      }
+      var r = CosTaskSchedulerService.rescheduleTaskToLocalYmd(
+        ss,
+        taskId,
+        targetYmd
+      );
+      if (r.ok && r.slot) {
+        var tz =
+          String(settings.timezone || '').trim() || ss.getSpreadsheetTimeZone();
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          '📅 Moved to ' +
+            targetYmd +
+            ' · ' +
+            Utilities.formatDate(r.slot.start, tz, 'EEE HH:mm') +
+            ' (sheet TZ)'
+        );
+        return;
+      }
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Could not reschedule: ' +
+          String((r && r.message) || r.code || 'failed').substring(0, 280)
+      );
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {string} taskId
+   * @param {CosSettings} settings
+   * @private
+   */
+  _executePickDrop_: function (chatStr, tok, taskId) {
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    if (!ss) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'Spreadsheet not reachable.');
+      return;
+    }
+    var repo = new CosTaskRepository(ss);
+    var updated = repo.dropPendingOrScheduledTask(taskId);
+    if (updated) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        '🗑️ Dropped: ' + String(updated.task || '').substring(0, 200)
+      );
+      return;
+    }
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      'Could not drop that task (wrong status or not found).'
+    );
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {Object} ai CosTelegramParseAiService.tryInterpret result with ok true
+   * @param {CosSettings} settings
+   * @returns {boolean} true if handled
+   * @private
+   */
+  _applyLlmInterpretResult_: function (chatStr, tok, ai, settings) {
+    if (!ai || !ai.ok) {
+      return false;
+    }
+    if (ai.kind === 'chat') {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        String(ai.replyText || '').trim() || 'At your service.'
+      );
+      return true;
+    }
+    if (ai.kind === 'clarify') {
+      var slim = [];
+      var i;
+      for (i = 0; i < ai.options.length; i++) {
+        var sp = CosTelegramService._slimClarifyPayload_(ai.options[i].payload);
+        if (sp) {
+          slim.push({
+            label: ai.options[i].label,
+            payload: sp,
+          });
+        }
+      }
+      if (slim.length < 2) {
+        return false;
+      }
+      var props = PropertiesService.getScriptProperties();
+      var key = CosConstants.TELEGRAM_CLARIFY_PENDING_PREFIX + chatStr;
+      props.setProperty(
+        key,
+        JSON.stringify({
+          exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+          options: slim.map(function (x) {
+            return x.payload;
+          }),
+        })
+      );
+      var lines = [];
+      for (i = 0; i < slim.length; i++) {
+        lines.push(String(i + 1) + ') ' + slim[i].label);
+      }
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        '❔ ' +
+          (String(ai.replyText || '').trim() || ai.question) +
+          '\n\n' +
+          lines.join('\n') +
+          '\n\nReply with 1, 2, or 3.'
+      );
+      return true;
+    }
+    if (ai.kind === 'reschedule_named') {
+      CosTelegramService._runRescheduleNamed_(chatStr, tok, ai, settings);
+      return true;
+    }
+    if (ai.kind === 'drop_named') {
+      CosTelegramService._runDropNamed_(chatStr, tok, ai, settings);
+      return true;
+    }
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    if (!ss) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Spreadsheet not reachable. Open the Tasks sheet once or set BOUND_SPREADSHEET_ID and run Install.'
+      );
+      return true;
+    }
+    if (ai.kind === 'single') {
+      CosTelegramService._createAndConfirmTelegramTask_(
+        chatStr,
+        tok,
+        ss,
+        {
+          task: ai.task,
+          priority: ai.priority,
+          durationMin: ai.durationMin,
+          notes: ai.notes || '',
+        },
+        '',
+        true,
+        ai.replyText || ''
+      );
+      return true;
+    }
+    if (ai.kind === 'business_day_split') {
+      CosTelegramService._handleBusinessDaySplit_(
+        chatStr,
+        tok,
+        {
+          ok: true,
+          baseTitle: ai.baseTitle,
+          minutesPerDay: ai.minutesPerDay,
+          businessDayCount: ai.businessDayCount,
+          startAnchor: ai.startAnchor,
+          priority: ai.priority,
+        },
+        ss,
+        ai.replyText || ''
+      );
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ titleSearch: string, dayPhrase: string }} ai
+   * @param {CosSettings} settings
+   * @private
+   */
+  _runRescheduleNamed_: function (chatStr, tok, ai, settings) {
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(120000)) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'Busy — try again in a moment.');
+      return;
+    }
+    try {
+      var ss = CosBootstrap.getSpreadsheetForRun();
+      if (!ss) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Spreadsheet not reachable. Open the Tasks sheet once or set BOUND_SPREADSHEET_ID and run Install.'
+        );
+        return;
+      }
+      var tz =
+        String(settings.timezone || '').trim() || ss.getSpreadsheetTimeZone();
+      var ymd = CosTelegramDayResolve.phraseToYmd(tz, ai.dayPhrase);
+      if (!ymd) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Could not parse the day. Try: tomorrow, thursday, next monday, or yyyy-MM-dd (sheet timezone).'
+        );
+        return;
+      }
+      var repo = new CosTaskRepository(ss);
+      var list = repo.searchTasksForTelegramEdit(ai.titleSearch, 5);
+      if (!list.length) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'No Pending/Scheduled task matched “' +
+            ai.titleSearch.substring(0, 80) +
+            '”.'
+        );
+        return;
+      }
+      if (list.length === 1) {
+        var r = CosTaskSchedulerService.rescheduleTaskToLocalYmd(
+          ss,
+          list[0].taskId,
+          ymd
+        );
+        if (r.ok && r.slot) {
+          CosTelegramService._replyPlain_(
+            chatStr,
+            tok,
+            '📅 Moved “' +
+              String(list[0].task || '').substring(0, 60) +
+              '” to ' +
+              ymd +
+              ' · ' +
+              Utilities.formatDate(r.slot.start, tz, 'EEE HH:mm') +
+              ' (sheet TZ)'
+          );
+          return;
+        }
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Could not book that day: ' +
+            String((r && r.message) || r.code || '?').substring(0, 250)
+        );
+        return;
+      }
+      var props = PropertiesService.getScriptProperties();
+      var key = CosConstants.TELEGRAM_TASK_PICK_PENDING_PREFIX + chatStr;
+      var cand = [];
+      var j;
+      for (j = 0; j < list.length; j++) {
+        cand.push({
+          taskId: list[j].taskId,
+          title: String(list[j].task || '').substring(0, 120),
+        });
+      }
+      props.setProperty(
+        key,
+        JSON.stringify({
+          exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+          action: 'reschedule',
+          targetYmd: ymd,
+          candidates: cand,
+        })
+      );
+      var lines = [];
+      for (j = 0; j < cand.length; j++) {
+        lines.push(String(j + 1) + ') ' + cand[j].title);
+      }
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Which task (→ ' +
+          ymd +
+          ')?\n' +
+          lines.join('\n') +
+          '\n\nReply with a number 1–' +
+          String(cand.length) +
+          '.'
+      );
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ titleSearch: string }} ai
+   * @param {CosSettings} settings
+   * @private
+   */
+  _runDropNamed_: function (chatStr, tok, ai, settings) {
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    if (!ss) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Spreadsheet not reachable. Open the Tasks sheet once or set BOUND_SPREADSHEET_ID and run Install.'
+      );
+      return;
+    }
+    var repo = new CosTaskRepository(ss);
+    var list = repo.searchTasksForTelegramEdit(ai.titleSearch, 5);
+    if (!list.length) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'No Pending/Scheduled task matched “' +
+          ai.titleSearch.substring(0, 80) +
+          '”.'
+      );
+      return;
+    }
+    if (list.length === 1) {
+      var updated = repo.dropPendingOrScheduledTask(list[0].taskId);
+      if (updated) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          '🗑️ Dropped: ' + String(updated.task || '').substring(0, 200)
+        );
+        return;
+      }
+      CosTelegramService._replyPlain_(chatStr, tok, 'Could not drop that task.');
+      return;
+    }
+    var props = PropertiesService.getScriptProperties();
+    var key = CosConstants.TELEGRAM_TASK_PICK_PENDING_PREFIX + chatStr;
+    var cand = [];
+    var j;
+    for (j = 0; j < list.length; j++) {
+      cand.push({
+        taskId: list[j].taskId,
+        title: String(list[j].task || '').substring(0, 120),
+      });
+    }
+    props.setProperty(
+      key,
+      JSON.stringify({
+        exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+        action: 'drop',
+        targetYmd: '',
+        candidates: cand,
+      })
+    );
+    var lines = [];
+    for (j = 0; j < cand.length; j++) {
+      lines.push(String(j + 1) + ') ' + cand[j].title);
+    }
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      'Which task to drop?\n' +
+        lines.join('\n') +
+        '\n\nReply with a number 1–' +
+        String(cand.length) +
+        '.'
+    );
+  },
+
+  /**
    * @param {string} chatStr
    * @param {string} tok
    * @param {{ baseTitle: string, minutesPerDay: number, businessDayCount: number, startAnchor: string, priority: string }} bd
@@ -360,6 +967,7 @@ var CosTelegramService = {
       );
       return;
     }
+    var replyPrefix = arguments.length >= 5 ? String(arguments[4] || '') : '';
     try {
       var settings = new CosSettingsRepository().getSettings();
       var tz =
@@ -400,8 +1008,10 @@ var CosTelegramService = {
       var badLines = [];
       var i;
       var n = ymds.length;
+      var maxSlip =
+        CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_FORWARD_SLIP_BUSINESS_DAYS;
       for (i = 0; i < n; i++) {
-        var ymd = ymds[i];
+        var intendedYmd = ymds[i];
         var rowTitle =
           bd.baseTitle + ' (' + String(i + 1) + '/' + String(n) + ')';
         var task = repo.createTask({
@@ -409,15 +1019,32 @@ var CosTelegramService = {
           priority: bd.priority,
           durationMin: bd.minutesPerDay,
           source: CosConstants.TASK_SOURCE.TELEGRAM,
-          notes: '',
+          notes: '[Jeeves split:' + intendedYmd + ']',
         });
-        var sch = CosTaskSchedulerService.schedulePendingTaskOnLocalYmd(
-          ss,
-          task.taskId,
-          ymd,
-          busy
-        );
-        if (sch.result === 'scheduled' && sch.slot) {
+        var tryYmd = intendedYmd;
+        var sch = null;
+        var slip;
+        for (slip = 0; slip <= maxSlip; slip++) {
+          if (slip > 0) {
+            tryYmd = CosBusinessDaySplitService.nextWeekdayAfterYmd_(tz, tryYmd);
+            var tagUp = repo.updateTask(task.taskId, {
+              notes: '[Jeeves split:' + tryYmd + ']',
+            });
+            if (tagUp) {
+              task = tagUp;
+            }
+          }
+          sch = CosTaskSchedulerService.schedulePendingTaskOnLocalYmd(
+            ss,
+            task.taskId,
+            tryYmd,
+            busy
+          );
+          if (sch.result === 'scheduled' && sch.slot) {
+            break;
+          }
+        }
+        if (sch && sch.result === 'scheduled' && sch.slot) {
           busy.push({
             start: sch.slot.start,
             end: sch.slot.end,
@@ -426,20 +1053,25 @@ var CosTelegramService = {
               CosConstants.CALENDAR_JEEVES_EVENT_TITLE_PREFIX +
               '(split batch)',
           });
-          okLines.push(
+          var line =
             '• ' +
-              ymd +
-              ' row ' +
-              task.rowNumber +
-              ' · ' +
-              Utilities.formatDate(sch.slot.start, tz, 'EEE HH:mm')
-          );
+            tryYmd +
+            ' row ' +
+            task.rowNumber +
+            ' · ' +
+            Utilities.formatDate(sch.slot.start, tz, 'EEE HH:mm');
+          if (tryYmd !== intendedYmd) {
+            line += ' (no slot on ' + intendedYmd + '; slipped forward)';
+          }
+          okLines.push(line);
         } else {
           badLines.push(
-            '• ' +
-              ymd +
+            '• intended ' +
+              intendedYmd +
               ' row ' +
               task.rowNumber +
+              ' — tried through ' +
+              tryYmd +
               ' — ' +
               String((sch.detail && sch.detail.reason) || sch.result || '?')
           );
@@ -457,7 +1089,21 @@ var CosTelegramService = {
         msg += '\n\nNot booked (still Pending):\n' + badLines.join('\n');
       }
       msg += '\n\nSheet TZ: ' + tz + ' · weekdays only';
+      if (replyPrefix) {
+        msg = replyPrefix + '\n\n' + msg;
+      }
       CosTelegramService._replyPlain_(chatStr, tok, msg);
+      CosTelegramService._writeChatContext_(chatStr, {
+        lastKind: 'business_day_split',
+        lastBaseTitle: bd.baseTitle,
+        lastMinutesPerDay: bd.minutesPerDay,
+        lastBusinessDayCount: bd.businessDayCount,
+        lastStartAnchor: bd.startAnchor,
+        lastPriority: bd.priority,
+        lastOkCount: okLines.length,
+        lastBadCount: badLines.length,
+        lastAtIso: new Date().toISOString(),
+      });
       CosLogger.info('Telegram business-day split', {
         booked: okLines.length,
         failed: badLines.length,
@@ -472,6 +1118,91 @@ var CosTelegramService = {
       CosLogger.error('Telegram business-day split', { error: String(err) });
     } finally {
       lock.releaseLock();
+    }
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+   * @param {{ task: string, priority: string, durationMin: string, notes?: string }} fields
+   * @param {string} raw
+   * @param {boolean} usedAi
+   * @private
+   */
+  _createAndConfirmTelegramTask_: function (
+    chatStr,
+    tok,
+    ss,
+    fields,
+    raw,
+    usedAi
+  ) {
+    var replyPrefix = arguments.length >= 7 ? String(arguments[6] || '') : '';
+    try {
+      var repo = new CosTaskRepository(ss);
+      var task = repo.createTask({
+        task: fields.task,
+        priority: fields.priority,
+        durationMin: fields.durationMin,
+        source: CosConstants.TASK_SOURCE.TELEGRAM,
+        notes: fields.notes || '',
+      });
+      var confirm;
+      if (replyPrefix) {
+        confirm =
+          replyPrefix +
+          '\n\n' +
+          'Added (row ' +
+          task.rowNumber +
+          '): ' +
+          task.task.substring(0, 240) +
+          '\n' +
+          task.priority +
+          ' · ' +
+          task.durationMin +
+          ' min';
+      } else {
+        confirm =
+          'Task added (row ' +
+          task.rowNumber +
+          ')\n' +
+          task.task +
+          '\nPriority: ' +
+          task.priority +
+          '\nDuration: ' +
+          task.durationMin +
+          ' min\nSource: Telegram' +
+          (usedAi ? '\n(Interpreted with AI)' : '');
+      }
+      CosTelegramService._replyPlain_(chatStr, tok, confirm);
+      CosTelegramService._writeChatContext_(chatStr, {
+        lastKind: 'single',
+        lastTaskId: task.taskId,
+        lastTitle: task.task,
+        lastPriority: task.priority,
+        lastDurationMin: task.durationMin,
+        lastRowNumber: task.rowNumber,
+        lastAtIso: new Date().toISOString(),
+      });
+      CosLogger.info('Telegram task capture: created', {
+        raw: raw,
+        parsed: fields,
+        taskId: task.taskId,
+        row: task.rowNumber,
+        ai: usedAi,
+      });
+    } catch (err) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Could not save the task: ' + String(err.message || err).substring(0, 200)
+      );
+      CosLogger.error('Telegram task capture: createTask failed', {
+        raw: raw,
+        parsed: fields,
+        error: String(err),
+      });
     }
   },
 
@@ -697,6 +1428,10 @@ var CosTelegramWebhook = {
       return;
     }
 
+    if (CosTelegramService._consumeTelegramPendingUi_(chatStr, tok, text, settings)) {
+      return;
+    }
+
     if (!settings.telegramTaskCaptureEnabled) {
       if (settings.telegramClosureEnabled) {
         CosTelegramService._replyPlain_(
@@ -706,6 +1441,46 @@ var CosTelegramWebhook = {
         );
       }
       return;
+    }
+
+    // Conversational mode: LLM-first (when enabled) + friendly chat replies.
+    if (
+      settings.telegramConversationalModeEnabled &&
+      CosTelegramParseAiService.isEnabled_(settings)
+    ) {
+      var ctx = CosTelegramService._readChatContext_(chatStr);
+      var aiConv = CosTelegramParseAiService.tryInterpretConversational(
+        settings,
+        text,
+        {
+          chat_id: chatStr,
+          context: ctx,
+          sheet_timezone: settings.timezone || '',
+          hints: {
+            business_day_split_max:
+              CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS,
+          },
+        }
+      );
+      if (aiConv && aiConv.ok) {
+        if (aiConv.kind === 'chat') {
+          CosTelegramService._replyPlain_(chatStr, tok, aiConv.replyText || '');
+          CosTelegramService._writeChatContext_(chatStr, {
+            lastKind: 'chat',
+            lastAtIso: new Date().toISOString(),
+            lastUserText: String(text || '').substring(0, 400),
+          });
+          return;
+        }
+        if (CosTelegramService._applyLlmInterpretResult_(chatStr, tok, aiConv, settings)) {
+          CosLogger.info('Telegram task capture: LLM (conversational mode)', {
+            raw: text,
+            kind: aiConv.kind,
+          });
+          return;
+        }
+      }
+      // Fall through to deterministic parsing when LLM fails or returns unusable output.
     }
 
     var bd = CosTelegramTaskCaptureParser.parseBusinessDaySplit(text);
@@ -727,17 +1502,58 @@ var CosTelegramWebhook = {
       bd.code !== 'slash' &&
       bd.code !== 'empty_or_long'
     ) {
+      var aiRescue = CosTelegramParseAiService.tryInterpret(settings, text);
+      if (
+        aiRescue.ok &&
+        CosTelegramParseAiService.isEnabled_(settings) &&
+        CosTelegramService._applyLlmInterpretResult_(
+          chatStr,
+          tok,
+          aiRescue,
+          settings
+        )
+      ) {
+        CosLogger.info('Telegram task capture: LLM (bd rescue path)', {
+          raw: text,
+        });
+        return;
+      }
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
         bd.helpText ||
-          'Could not parse business-day split. Say duration per day + number of business days + “to …” for the work.'
+          'Could not parse weekday split. Say duration per day (e.g. 1 hour a day), number of workdays, and the work (e.g. “… to …” or “… on the …”).'
       );
       return;
     }
 
     var parsed = CosTelegramTaskCaptureParser.parse(text);
     if (!parsed.ok) {
+      var tryLlm =
+        (parsed.code === 'no_intent' || parsed.code === 'no_title') &&
+        CosTelegramParseAiService.isEnabled_(settings);
+      if (tryLlm) {
+        var ai2 = CosTelegramParseAiService.tryInterpret(settings, text);
+        if (CosTelegramService._applyLlmInterpretResult_(chatStr, tok, ai2, settings)) {
+          CosLogger.info('Telegram task capture: LLM after rule parse fail', {
+            raw: text,
+            afterCode: parsed.code,
+          });
+          return;
+        }
+        if (ai2.ok === false && ai2.code === 'not_task') {
+          CosTelegramService._replyPlain_(
+            chatStr,
+            tok,
+            'That doesn’t look like a task request. Send /task P2 30m … or a phrase like “Create task: …”.'
+          );
+          CosLogger.info('Telegram task capture: LLM not_task', {
+            raw: text,
+            ruleCode: parsed.code,
+          });
+          return;
+        }
+      }
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
@@ -761,44 +1577,19 @@ var CosTelegramWebhook = {
       return;
     }
 
-    try {
-      var repo = new CosTaskRepository(ss);
-      var task = repo.createTask({
+    CosTelegramService._createAndConfirmTelegramTask_(
+      chatStr,
+      tok,
+      ss,
+      {
         task: parsed.task,
         priority: parsed.priority,
         durationMin: parsed.durationMin,
-        source: CosConstants.TASK_SOURCE.TELEGRAM,
         notes: parsed.notes || '',
-      });
-      var confirm =
-        'Task added (row ' +
-        task.rowNumber +
-        ')\n' +
-        task.task +
-        '\nPriority: ' +
-        task.priority +
-        '\nDuration: ' +
-        task.durationMin +
-        ' min\nSource: Telegram';
-      CosTelegramService._replyPlain_(chatStr, tok, confirm);
-      CosLogger.info('Telegram task capture: created', {
-        raw: text,
-        parsed: parsed,
-        taskId: task.taskId,
-        row: task.rowNumber,
-      });
-    } catch (err) {
-      CosTelegramService._replyPlain_(
-        chatStr,
-        tok,
-        'Could not save the task: ' + String(err.message || err).substring(0, 200)
-      );
-      CosLogger.error('Telegram task capture: createTask failed', {
-        raw: text,
-        parsed: parsed,
-        error: String(err),
-      });
-    }
+      },
+      text,
+      false
+    );
   },
 };
 

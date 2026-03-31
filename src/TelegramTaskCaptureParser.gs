@@ -20,7 +20,11 @@ var CosTelegramTaskCaptureParser = {
       return { ok: false, code: 'slash' };
     }
     var lower = raw.toLowerCase();
-    if (!/business\s+days?/.test(lower)) {
+    if (
+      !/business\s+days?/.test(lower) &&
+      !/work\s*days?/.test(lower) &&
+      !/working\s+days?/.test(lower)
+    ) {
       return { ok: false, code: 'no_match' };
     }
     if (!/per\s+day|each\s+day|every\s+day|a\s+day\b/.test(lower)) {
@@ -30,13 +34,19 @@ var CosTelegramTaskCaptureParser = {
     var countM =
       /\b(?:the\s+)?next\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw) ||
       /\bfor\s+the\s+next\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw) ||
-      /\bfor\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw);
+      /\bfor\s+(\d{1,2})\s+business\s+days?\b/i.exec(raw) ||
+      /\b(?:the\s+)?next\s+(\d{1,2})\s+work\s*days?\b/i.exec(raw) ||
+      /\bfor\s+the\s+next\s+(\d{1,2})\s+work\s*days?\b/i.exec(raw) ||
+      /\bfor\s+(\d{1,2})\s+work\s*days?\b/i.exec(raw) ||
+      /\b(?:the\s+)?next\s+(\d{1,2})\s+working\s+days?\b/i.exec(raw) ||
+      /\bfor\s+the\s+next\s+(\d{1,2})\s+working\s+days?\b/i.exec(raw) ||
+      /\bfor\s+(\d{1,2})\s+working\s+days?\b/i.exec(raw);
     if (!countM) {
       return {
         ok: false,
         code: 'no_count',
         helpText:
-          'Say how many weekdays, e.g. “for the next 5 business days”.',
+          'Say how many weekdays, e.g. “for the next 5 workdays” or “for the next 5 business days”.',
       };
     }
     var n = parseInt(countM[1], 10);
@@ -60,6 +70,12 @@ var CosTelegramTaskCaptureParser = {
     if (hPer) {
       minutes = parseInt(hPer[1], 10) * 60;
     } else {
+      var hAD = /\b(\d{1,2})\s*(?:hours?|hrs?)\s+a\s+day\b/i.exec(raw);
+      if (hAD) {
+        minutes = parseInt(hAD[1], 10) * 60;
+      }
+    }
+    if (minutes === null) {
       var mPer =
         /\b(\d{1,3})\s*(?:min|minutes|mins)\s+per\s+day\b/i.exec(raw);
       if (mPer) {
@@ -71,7 +87,7 @@ var CosTelegramTaskCaptureParser = {
         ok: false,
         code: 'bad_duration',
         helpText:
-          'Include duration per day, e.g. “1 hour per day” or “45 minutes per day”.',
+          'Include duration per day, e.g. “1 hour a day”, “1 hour per day”, or “45 minutes per day”.',
       };
     }
 
@@ -110,6 +126,40 @@ var CosTelegramTaskCaptureParser = {
       return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
     }
     m = /\bfor\s+the\s+next\s+\d+\s+business\s+days?\s+to\s+(.+)/i.exec(
+      oneLine
+    );
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\bfor\s+the\s+next\s+\d+\s+work\s*days?\s+on\s+the\s+(.+)/i.exec(
+      oneLine
+    );
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\bfor\s+the\s+next\s+\d+\s+working\s+days?\s+on\s+the\s+(.+)/i.exec(
+      oneLine
+    );
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\bfor\s+the\s+next\s+\d+\s+work\s*days?\s+on\s+(.+)/i.exec(oneLine);
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\bfor\s+the\s+next\s+\d+\s+working\s+days?\s+on\s+(.+)/i.exec(
+      oneLine
+    );
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\b(?:the\s+)?next\s+\d+\s+(?:business\s+days?|work\s*days?|working\s+days?)\s+on\s+the\s+(.+)/i.exec(
+      oneLine
+    );
+    if (m) {
+      return CosTelegramTaskCaptureParser._stripDurationFromTail_(m[1].trim());
+    }
+    m = /\b(?:the\s+)?next\s+\d+\s+(?:business\s+days?|work\s*days?|working\s+days?)\s+on\s+(.+)/i.exec(
       oneLine
     );
     if (m) {
@@ -422,6 +472,23 @@ var CosTelegramTaskCaptureParser = {
     } else {
       failed++;
       failures.push('business-day split CEO deck example');
+    }
+
+    var bs2 = CosTelegramTaskCaptureParser.parseBusinessDaySplit(
+      '1 hour a day for the next 5 workdays on the Engg Leadership Search'
+    );
+    if (
+      bs2.ok &&
+      bs2.businessDayCount === 5 &&
+      bs2.minutesPerDay === 60 &&
+      /Engg\s+Leadership\s+Search/i.test(bs2.baseTitle)
+    ) {
+      passed++;
+    } else {
+      failed++;
+      failures.push(
+        'workdays + hour a day + on the title: ' + JSON.stringify(bs2)
+      );
     }
 
     for (i = 0; i < cases.length; i++) {

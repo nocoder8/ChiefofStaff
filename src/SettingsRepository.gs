@@ -155,6 +155,16 @@ CosSettingsRepository.prototype.getSettings = function () {
       keys.TELEGRAM_USE_POLLING,
       false
     ),
+    telegramParseAiEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.TELEGRAM_PARSE_AI_ENABLED,
+      false
+    ),
+    telegramConversationalModeEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.TELEGRAM_CONVERSATIONAL_MODE_ENABLED,
+      false
+    ),
   };
 };
 
@@ -256,6 +266,12 @@ CosSettingsRepository.prototype.seedDefaultsIfMissing = function (
   }
   if (existing[keys.TELEGRAM_USE_POLLING] === undefined) {
     patch[keys.TELEGRAM_USE_POLLING] = 'false';
+  }
+  if (existing[keys.TELEGRAM_PARSE_AI_ENABLED] === undefined) {
+    patch[keys.TELEGRAM_PARSE_AI_ENABLED] = 'false';
+  }
+  if (existing[keys.TELEGRAM_CONVERSATIONAL_MODE_ENABLED] === undefined) {
+    patch[keys.TELEGRAM_CONVERSATIONAL_MODE_ENABLED] = 'false';
   }
 
   if (Object.keys(patch).length) {

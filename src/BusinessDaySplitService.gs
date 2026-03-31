@@ -35,4 +35,26 @@ var CosBusinessDaySplitService = {
     }
     return out;
   },
+
+  /**
+   * Next calendar Mon–Fri strictly after ymd (sheet timezone). Skips Sat/Sun.
+   * @param {string} tz IANA
+   * @param {string} ymd yyyy-MM-dd
+   * @returns {string}
+   */
+  nextWeekdayAfterYmd_: function (tz, ymd) {
+    var zone = String(tz || '').trim() || Session.getScriptTimeZone();
+    var y = cos_ymdAddCalendarDays_(String(ymd || '').trim(), 1, zone);
+    var guard = 0;
+    while (guard < 400) {
+      guard++;
+      var probe = Utilities.parseDate(y + ' 12:00', zone, 'yyyy-MM-dd HH:mm');
+      var dk = CosWorkHoursParser.dayKeyForDate(probe, zone);
+      if (dk !== 'saturday' && dk !== 'sunday') {
+        return y;
+      }
+      y = cos_ymdAddCalendarDays_(y, 1, zone);
+    }
+    return y;
+  },
 };

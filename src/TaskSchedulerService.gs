@@ -5,6 +5,9 @@ var CosTaskSchedulerService = {
   /** Notes tag: do not schedule before start of this local calendar day (sheet TZ). */
   JEEVES_DEFER_NOTE_RE: /\[Jeeves defer:\d{4}-\d{2}-\d{2}\]/g,
 
+  /** Notes tag: Pending row from Telegram business-day split — only book on this local yyyy-MM-dd. */
+  JEEVES_SPLIT_NOTE_RE: /\[Jeeves split:\d{4}-\d{2}-\d{2}\]/g,
+
   /**
    * @param {string} notes
    * @returns {string}
@@ -61,6 +64,27 @@ var CosTaskSchedulerService = {
   },
 
   /**
+   * @param {string} notes
+   * @returns {string} yyyy-MM-dd or ''
+   */
+  extractSplitYmdFromNotes_: function (notes) {
+    var m = /\[Jeeves split:(\d{4}-\d{2}-\d{2})\]/.exec(String(notes || ''));
+    return m ? m[1] : '';
+  },
+
+  /**
+   * @param {string} notes
+   * @returns {string}
+   */
+  stripJeevesSplitTagFromNotes_: function (notes) {
+    var s = String(notes || '').replace(
+      CosTaskSchedulerService.JEEVES_SPLIT_NOTE_RE,
+      ''
+    );
+    return s.replace(/\n{3,}/g, '\n\n').replace(/^\s+|\s+$/g, '');
+  },
+
+  /**
    * Earliest instant that falls on ymd in tz (15-min scan).
    * @param {string} ymd
    * @param {string} tz
@@ -90,6 +114,44 @@ var CosTaskSchedulerService = {
       first -= step;
     }
     return new Date(first);
+  },
+
+  /**
+   * End of the last work-hours block on a local calendar day (split-day minSlotStart fix).
+   * @param {CosWorkHoursWeek} workModel
+   * @param {string} ymd yyyy-MM-dd
+   * @param {string} tz
+   * @returns {Date|null}
+   * @private
+   */
+  _localLastWorkEndOnYmd_: function (workModel, ymd, tz) {
+    var dayProbe = Utilities.parseDate(ymd + ' 12:00', tz, 'yyyy-MM-dd HH:mm');
+    var dayKey = CosWorkHoursParser.dayKeyForDate(dayProbe, tz);
+    var blocks = CosWorkHoursParser.blocksForDay(workModel, dayKey);
+    if (!blocks.length) {
+      return null;
+    }
+    var maxEnd = 0;
+    var bi;
+    for (bi = 0; bi < blocks.length; bi++) {
+      var ce = CosWorkHoursParser.parseClock(blocks[bi].end);
+      if (!ce) {
+        continue;
+      }
+      var blockEnd = cos_combineDateAndTime_(
+        ymd,
+        cos_pad2_(ce.h) + ':' + cos_pad2_(ce.m),
+        tz
+      );
+      if (isNaN(blockEnd.getTime())) {
+        continue;
+      }
+      var t = blockEnd.getTime();
+      if (t > maxEnd) {
+        maxEnd = t;
+      }
+    }
+    return maxEnd > 0 ? new Date(maxEnd) : null;
   },
 
   /**
@@ -479,7 +541,8 @@ var CosTaskSchedulerService = {
 
     var deadline = CosTaskSchedulerService._parseDeadline_(task.deadline);
     var delayH = CosTaskSchedulerService._priorityDelayHours_(task.priority);
-    var minSlotStart = new Date(now.getTime() + delayH * 3600000);
+    var delayStart = new Date(now.getTime() + delayH * 3600000);
+    var minSlotStart = delayStart;
     var deferYmd = CosTaskSchedulerService.extractDeferYmdFromNotes_(task.notes);
     if (deferYmd) {
       var deferStart = CosTaskSchedulerService._localDayStartForYmdInTz_(
@@ -492,6 +555,48 @@ var CosTaskSchedulerService = {
         }
       }
     }
+    var splitYmd = CosTaskSchedulerService.extractSplitYmdFromNotes_(task.notes);
+    var ry = String(restrictToYmd || '').trim();
+    if (!ry && splitYmd && /^\d{4}-\d{2}-\d{2}$/.test(splitYmd)) {
+      ry = splitYmd;
+    }
+    if (ry && /^\d{4}-\d{2}-\d{2}$/.test(ry)) {
+      var lastWorkEnd = CosTaskSchedulerService._localLastWorkEndOnYmd_(
+        workModel,
+        ry,
+        tz
+      );
+      if (
+        lastWorkEnd &&
+        !isNaN(lastWorkEnd.getTime()) &&
+        delayStart.getTime() > lastWorkEnd.getTime()
+      ) {
+        minSlotStart = new Date(now.getTime());
+        if (deferYmd) {
+          var deferAgain = CosTaskSchedulerService._localDayStartForYmdInTz_(
+            deferYmd,
+            tz
+          );
+          if (
+            deferAgain &&
+            !isNaN(deferAgain.getTime()) &&
+            deferAgain.getTime() > minSlotStart.getTime()
+          ) {
+            minSlotStart = deferAgain;
+          }
+        }
+        CosSchedulingLog.log(
+          'restrict day: priority delay after last work on target day; floor minSlotStart at now (+ defer)',
+          {
+            taskId: taskId,
+            ymd: ry,
+            delayHours: delayH,
+            delayStartIso: delayStart.toISOString(),
+            lastWorkEndIso: lastWorkEnd.toISOString(),
+          }
+        );
+      }
+    }
     CosSchedulingLog.log('earliest allowed slot start', {
       taskId: taskId,
       title: task.task,
@@ -499,12 +604,12 @@ var CosTaskSchedulerService = {
       delayHours: delayH,
       minSlotStartIso: minSlotStart.toISOString(),
       jeevesDeferYmd: deferYmd || '',
+      jeevesSplitYmd: splitYmd || '',
       restrictToYmd: restrictToYmd || '',
+      restrictEffective: ry || '',
       deadline: task.deadline || '',
       durationMin: dur,
     });
-
-    var ry = String(restrictToYmd || '').trim();
     var slot =
       ry && /^\d{4}-\d{2}-\d{2}$/.test(ry)
         ? CosTaskSchedulerService._trySlotOnYmd_(
@@ -573,6 +678,15 @@ var CosTaskSchedulerService = {
             reason: 'sheet_write_failed',
           }),
         };
+      }
+      var notesClean = CosTaskSchedulerService.stripJeevesSplitTagFromNotes_(
+        updated.notes
+      );
+      if (notesClean !== String(updated.notes || '')) {
+        var updNotes = taskRepo.updateTask(taskId, { notes: notesClean });
+        if (updNotes) {
+          updated = updNotes;
+        }
       }
       CosSchedulingLog.log('slot booked', {
         taskId: taskId,
@@ -1001,6 +1115,97 @@ var CosTaskSchedulerService = {
       result: one.result,
       slot: one.slot || undefined,
       detail: one.detail,
+    };
+  },
+
+  /**
+   * Move a Pending or Scheduled task onto a specific local day (remove old Jeeves event if any).
+   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+   * @param {string} taskId
+   * @param {string} localYmd yyyy-MM-dd
+   * @returns {{ ok: boolean, code?: string, message?: string, slot?: {start:Date,end:Date}, task?: CosTask }}
+   */
+  rescheduleTaskToLocalYmd: function (ss, taskId, localYmd) {
+    var id = String(taskId || '').trim();
+    var ymd = String(localYmd || '').trim();
+    if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+      return { ok: false, code: 'bad_args', message: 'Bad task id or date.' };
+    }
+    var settings = new CosSettingsRepository().getSettings();
+    var repo = new CosTaskRepository(ss);
+    var task = repo.fetchByTaskId(id);
+    if (!task) {
+      return { ok: false, code: 'not_found', message: 'Task not found.' };
+    }
+    var st = String(task.status || '').trim();
+    if (
+      st !== CosConstants.TASK_STATUS.PENDING &&
+      st !== CosConstants.TASK_STATUS.SCHEDULED
+    ) {
+      return {
+        ok: false,
+        code: 'bad_status',
+        message: 'Only Pending or Scheduled tasks can be moved.',
+      };
+    }
+    if (CosTaskSchedulerService._isFollowUpPriority_(task.priority)) {
+      return {
+        ok: false,
+        code: 'follow_up',
+        message: 'Follow-up tasks are not calendar-scheduled.',
+      };
+    }
+    var cal = CosCalendarRepository.fromSettings(settings);
+    if (st === CosConstants.TASK_STATUS.SCHEDULED) {
+      CosTaskClosureService._deleteCalendarIfLinked_(cal, task);
+      var up = repo.updateTask(id, {
+        status: CosConstants.TASK_STATUS.PENDING,
+        scheduledStart: '',
+        scheduledEnd: '',
+        calendarEventId: '',
+        closureStatus: '',
+        closureRequestedAt: '',
+      });
+      if (!up) {
+        return { ok: false, code: 'update_failed', message: 'Could not clear schedule.' };
+      }
+      task = up;
+    }
+    var calRepo = CosCalendarRepository.fromSettings(settings);
+    var now = new Date();
+    var horizonEnd = cos_addCalendarDays_(now, 56);
+    var busyRaw = calRepo.listBusyIntervals(
+      cos_addCalendarDays_(now, -1),
+      horizonEnd
+    );
+    var busy = busyRaw.map(function (b) {
+      return {
+        start: b.start,
+        end: b.end,
+        id: b.id,
+        title: b.title,
+      };
+    });
+    var sch = CosTaskSchedulerService.schedulePendingTaskOnLocalYmd(
+      ss,
+      id,
+      ymd,
+      busy
+    );
+    if (sch.result === 'scheduled' && sch.slot) {
+      return {
+        ok: true,
+        slot: sch.slot,
+        task: repo.fetchByTaskId(id),
+      };
+    }
+    return {
+      ok: false,
+      code: String(
+        (sch.detail && sch.detail.reason) || sch.result || 'schedule_failed'
+      ),
+      message: 'No slot that day or scheduling failed.',
+      detail: sch.detail,
     };
   },
 };

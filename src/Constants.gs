@@ -170,6 +170,16 @@ var CosConstants = {
     TELEGRAM_CLOSURE_ENABLED: 'TELEGRAM_CLOSURE_ENABLED',
     /** When true, plain (non-reply) messages can create tasks via rule-based parser. */
     TELEGRAM_TASK_CAPTURE_ENABLED: 'TELEGRAM_TASK_CAPTURE_ENABLED',
+    /**
+     * When true + DIGEST_AI_API_KEY set, rule-based Telegram capture can call the LLM on hard parses
+     * (after deterministic rules fail or business-day wording is incomplete).
+     */
+    TELEGRAM_PARSE_AI_ENABLED: 'TELEGRAM_PARSE_AI_ENABLED',
+    /**
+     * When true, Telegram replies are more conversational and the LLM is used earlier (when enabled).
+     * Non-command chat will be answered without creating sheet rows unless an explicit action is returned.
+     */
+    TELEGRAM_CONVERSATIONAL_MODE_ENABLED: 'TELEGRAM_CONVERSATIONAL_MODE_ENABLED',
     /** Query param cos_tg on webhook URL; Apps Script doPost cannot read custom headers. */
     TELEGRAM_WEBHOOK_SECRET: 'TELEGRAM_WEBHOOK_SECRET',
     /**
@@ -184,6 +194,15 @@ var CosConstants = {
    * Script Properties key: TGMP1_{chatId}_{messageId} → taskId (pending numeric reply).
    */
   TELEGRAM_PENDING_KEY_PREFIX: 'TGMP1_',
+
+  /** TGCLAR2_{chatId} → JSON pending numeric choice after LLM “clarify” (see TelegramService). */
+  TELEGRAM_CLARIFY_PENDING_PREFIX: 'TGCLAR2_',
+
+  /** TGTPICK2_{chatId} → JSON pick task row after ambiguous reschedule/drop match. */
+  TELEGRAM_TASK_PICK_PENDING_PREFIX: 'TGTPICK2_',
+
+  /** Ms: clarify / disambiguation replies stay valid this long. */
+  TELEGRAM_PENDING_UI_TTL_MS: 15 * 60 * 1000,
 
   /** Signed closure links remain valid this many seconds (~45 days). */
   CLOSURE_LINK_TTL_SECONDS: 45 * 24 * 60 * 60,
@@ -208,6 +227,19 @@ var CosConstants = {
 
   /** Telegram “N business days × M min/h per day” split; max rows created in one message. */
   TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS: 14,
+
+  /**
+   * When the intended weekday has no slot, try this many **additional** Mon–Fri dates
+   * (forward only) before leaving the row Pending. Keeps split order: earlier rows
+   * consume earlier free weekdays so later rows can use the next ones.
+   */
+  TELEGRAM_BUSINESS_DAY_SPLIT_FORWARD_SLIP_BUSINESS_DAYS: 14,
+
+  /** Max chars sent to the Telegram parse LLM (truncated). */
+  TELEGRAM_PARSE_AI_MAX_INPUT_CHARS: 3500,
+
+  /** OpenAI default when DIGEST_AI_MODEL is empty and provider is openai. */
+  DEFAULT_TELEGRAM_PARSE_OPENAI_MODEL: 'gpt-4o-mini',
 
   SCHEMA_VERSION: '2',
 

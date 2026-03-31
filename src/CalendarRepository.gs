@@ -82,8 +82,8 @@ CosCalendarRepository.prototype.listBusyIntervals = function (start, end) {
 };
 
 /**
- * Declined invites and Google “working location” blocks do not count as busy for scheduling.
- * Working location uses CalendarApp.EventType.WORKING_LOCATION from getEventType(), not title matching.
+ * Declined invites, “Show as Free” (transparent) events, and Google “working location” blocks
+ * do not count as busy for scheduling.
  * @param {GoogleAppsScript.Calendar.CalendarEvent} e
  * @returns {boolean}
  */
@@ -94,6 +94,13 @@ function cos_calendarEventCountsAsBusy_(e) {
     }
   } catch (err) {
     // If status is unavailable, keep the event as busy.
+  }
+  try {
+    if (e.getTransparency() === CalendarApp.EventTransparency.TRANSPARENT) {
+      return false;
+    }
+  } catch (errTr) {
+    // If transparency is unavailable, treat as busy (opaque default).
   }
   try {
     if (e.getEventType() === CalendarApp.EventType.WORKING_LOCATION) {

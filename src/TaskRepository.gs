@@ -768,6 +768,112 @@ CosTaskRepository.prototype.fetchByTaskId = function (taskId) {
   return this._readTaskAtRow_(sheet, row);
 };
 
+/**
+ * Pending + Scheduled tasks whose title matches a search string (Telegram NL reschedule/drop).
+ * @param {string} query
+ * @param {number} limit
+ * @returns {CosTask[]}
+ */
+CosTaskRepository.prototype.searchTasksForTelegramEdit = function (query, limit) {
+  var q = String(query || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  var max = Math.max(1, Math.min(8, parseInt(String(limit), 10) || 5));
+  if (!q || q.length < 2) {
+    return [];
+  }
+  var tokens = q.split(' ').filter(function (t) {
+    return t.length > 0;
+  });
+  var all = this.fetchAllTasks();
+  var scored = [];
+  var i;
+  for (i = 0; i < all.length; i++) {
+    var t = all[i];
+    var st = String(t.status || '').trim();
+    if (
+      st !== CosConstants.TASK_STATUS.PENDING &&
+      st !== CosConstants.TASK_STATUS.SCHEDULED
+    ) {
+      continue;
+    }
+    var title = String(t.task || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!title) {
+      continue;
+    }
+    var score = 0;
+    if (title.indexOf(q) >= 0) {
+      score = 1000 + q.length;
+    } else {
+      var j;
+      var tokHits = 0;
+      for (j = 0; j < tokens.length; j++) {
+        if (tokens[j].length >= 2 && title.indexOf(tokens[j]) >= 0) {
+          tokHits++;
+        }
+      }
+      if (tokHits === 0) {
+        continue;
+      }
+      score = tokHits * 100;
+    }
+    var updRaw = new Date(String(t.updatedAt || '').trim()).getTime();
+    var upd = isNaN(updRaw) ? 0 : updRaw;
+    scored.push({ task: t, score: score, upd: upd });
+  }
+  scored.sort(function (a, b) {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return b.upd - a.upd;
+  });
+  var out = [];
+  for (i = 0; i < scored.length && i < max; i++) {
+    out.push(scored[i].task);
+  }
+  return out;
+};
+
+/**
+ * Drop a Pending or Scheduled task (calendar event removed if present).
+ * @param {string} taskId
+ * @returns {CosTask|null}
+ */
+CosTaskRepository.prototype.dropPendingOrScheduledTask = function (taskId) {
+  var id = String(taskId || '').trim();
+  if (!id) {
+    return null;
+  }
+  var task = this.fetchByTaskId(id);
+  if (!task) {
+    return null;
+  }
+  var st = String(task.status || '').trim();
+  if (
+    st !== CosConstants.TASK_STATUS.PENDING &&
+    st !== CosConstants.TASK_STATUS.SCHEDULED
+  ) {
+    return null;
+  }
+  var cal = CosCalendarRepository.fromSettings(
+    new CosSettingsRepository().getSettings()
+  );
+  CosTaskClosureService._deleteCalendarIfLinked_(cal, task);
+  return this.updateTask(id, {
+    status: CosConstants.TASK_STATUS.DROPPED,
+    lastOutcome: CosConstants.TASK_LAST_OUTCOME.DROPPED,
+    scheduledStart: '',
+    scheduledEnd: '',
+    calendarEventId: '',
+    closureStatus: '',
+    closureRequestedAt: '',
+  });
+};
+
 // --- Writes ---
 
 /**
