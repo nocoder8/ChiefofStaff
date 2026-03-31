@@ -204,6 +204,9 @@ var CosConstants = {
   /** TG1ON1_{chatId} → JSON pending pick after 3 mutual slot options for a 1:1 invite. */
   TELEGRAM_ONEONONE_PENDING_PREFIX: 'TG1ON1_',
 
+  /** TGDIR1_{chatId} → JSON pending pick when directory search returns multiple people for a 1:1. */
+  TELEGRAM_DIRECTORY_PICK_PENDING_PREFIX: 'TGDIR1_',
+
   /** Ms: clarify / disambiguation replies stay valid this long. */
   TELEGRAM_PENDING_UI_TTL_MS: 15 * 60 * 1000,
 

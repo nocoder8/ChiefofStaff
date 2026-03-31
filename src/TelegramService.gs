@@ -534,6 +534,42 @@ var CosTelegramService = {
       CosTelegramService._applyClarifyChoicePayload_(chatStr, tok, pay, settings);
       return true;
     }
+    var kDir = CosConstants.TELEGRAM_DIRECTORY_PICK_PENDING_PREFIX + chatStr;
+    var rawDir = props.getProperty(kDir);
+    if (rawDir) {
+      var dir = CosTelegramService._readTimedPending_(rawDir, now, props, kDir);
+      if (!dir) {
+        return false;
+      }
+      var nCand = dir.candidates ? dir.candidates.length : 0;
+      if (nCand < 1) {
+        return false;
+      }
+      var maxPick = Math.min(5, nCand);
+      if (!new RegExp('^[1-' + String(maxPick) + ']$').test(t)) {
+        return false;
+      }
+      var dix = parseInt(t, 10) - 1;
+      if (dix < 0 || dix >= nCand) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Pick a number from 1 to ' + String(maxPick) + '.'
+        );
+        return true;
+      }
+      props.deleteProperty(kDir);
+      var picked = dir.candidates[dix];
+      CosTelegramService._handleOneOnOnePropose_(chatStr, tok, {
+        attendeeEmail: picked.email,
+        attendeeName: '',
+        durationMin: dir.durationMin,
+        meetingTitle: dir.meetingTitle,
+        horizonDays: dir.horizonDays,
+        replyText: dir.replyText || '',
+      }, settings);
+      return true;
+    }
     var k1on1 = CosConstants.TELEGRAM_ONEONONE_PENDING_PREFIX + chatStr;
     var rawOo = props.getProperty(k1on1);
     if (rawOo) {
@@ -979,14 +1015,107 @@ var CosTelegramService = {
   },
 
   /**
+   * Resolve attendee email from explicit address or Workspace directory (name).
+   * @returns {{ email: string }|null} null if already replied (error / pick list).
+   * @private
+   */
+  _resolveAttendeeEmailForOneOnOne_: function (chatStr, tok, ai, settings) {
+    var email = String(ai.attendeeEmail || '')
+      .trim()
+      .toLowerCase();
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return { email: email };
+    }
+    var name = String(ai.attendeeName || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!name || name.length < 2) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Please give the colleague’s email or full name so I can look them up in the directory.'
+      );
+      return null;
+    }
+    var search = CosWorkspaceDirectoryService.searchDirectoryPeople(name, 8);
+    if (!search.ok) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
+          (search.message ||
+            'Directory lookup failed. Re-authorize the script if prompted, or use their full email.')
+      );
+      return null;
+    }
+    if (!search.people || !search.people.length) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
+          'I could not find “' +
+          name.substring(0, 80) +
+          '” in your organization directory. Try their email address.'
+      );
+      return null;
+    }
+    if (search.people.length === 1) {
+      return { email: search.people[0].email };
+    }
+    var props = PropertiesService.getScriptProperties();
+    var key = CosConstants.TELEGRAM_DIRECTORY_PICK_PENDING_PREFIX + chatStr;
+    props.setProperty(
+      key,
+      JSON.stringify({
+        exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+        candidates: search.people.slice(0, 5),
+        durationMin: ai.durationMin,
+        meetingTitle: ai.meetingTitle,
+        horizonDays: ai.horizonDays,
+        replyText: ai.replyText || '',
+      })
+    );
+    var lines = [];
+    var j;
+    var list = search.people.slice(0, 5);
+    for (j = 0; j < list.length; j++) {
+      var p = list[j];
+      lines.push(
+        String(j + 1) + ') ' + p.displayName + ' — ' + p.email
+      );
+    }
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
+        'I found several people. Which one?\n\n' +
+        lines.join('\n') +
+        '\n\nReply with a number 1–' +
+        String(list.length) +
+        '.'
+    );
+    return null;
+  },
+
+  /**
    * Mutual free time → three options; user replies 1–3 to send invites.
    * @param {string} chatStr
    * @param {string} tok
-   * @param {{ attendeeEmail: string, durationMin: number, meetingTitle: string, horizonDays: number, replyText?: string }} ai
+   * @param {{ attendeeEmail?: string, attendeeName?: string, durationMin: number, meetingTitle: string, horizonDays: number, replyText?: string }} ai
    * @param {CosSettings} settings
    * @private
    */
   _handleOneOnOnePropose_: function (chatStr, tok, ai, settings) {
+    var resolved = CosTelegramService._resolveAttendeeEmailForOneOnOne_(
+      chatStr,
+      tok,
+      ai,
+      settings
+    );
+    if (!resolved) {
+      return;
+    }
+    ai = Object.assign({}, ai, { attendeeEmail: resolved.email });
     var r = CosOneOnOneSchedulingService.findThreeMutualSlots(
       settings,
       ai.attendeeEmail,
