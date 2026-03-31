@@ -534,6 +534,30 @@ var CosTelegramService = {
       CosTelegramService._applyClarifyChoicePayload_(chatStr, tok, pay, settings);
       return true;
     }
+    var k1on1 = CosConstants.TELEGRAM_ONEONONE_PENDING_PREFIX + chatStr;
+    var rawOo = props.getProperty(k1on1);
+    if (rawOo) {
+      var oo = CosTelegramService._readTimedPending_(rawOo, now, props, k1on1);
+      if (!oo) {
+        return false;
+      }
+      if (!/^[1-3]$/.test(t)) {
+        return false;
+      }
+      var oix = parseInt(t, 10) - 1;
+      if (!oo.options || oix < 0 || oix >= oo.options.length) {
+        CosTelegramService._replyPlain_(chatStr, tok, 'Pick 1, 2, or 3.');
+        return true;
+      }
+      props.deleteProperty(k1on1);
+      CosTelegramService._executeOneOnOnePick_(
+        chatStr,
+        tok,
+        oo.options[oix],
+        settings
+      );
+      return true;
+    }
     var rawPk = props.getProperty(kPk);
     if (rawPk) {
       var pk = CosTelegramService._readTimedPending_(rawPk, now, props, kPk);
@@ -713,6 +737,10 @@ var CosTelegramService = {
     }
     if (ai.kind === 'drop_named') {
       CosTelegramService._runDropNamed_(chatStr, tok, ai, settings);
+      return true;
+    }
+    if (ai.kind === 'one_on_one_propose') {
+      CosTelegramService._handleOneOnOnePropose_(chatStr, tok, ai, settings);
       return true;
     }
     var ss = CosBootstrap.getSpreadsheetForRun();
@@ -948,6 +976,143 @@ var CosTelegramService = {
         String(cand.length) +
         '.'
     );
+  },
+
+  /**
+   * Mutual free time → three options; user replies 1–3 to send invites.
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ attendeeEmail: string, durationMin: number, meetingTitle: string, horizonDays: number, replyText?: string }} ai
+   * @param {CosSettings} settings
+   * @private
+   */
+  _handleOneOnOnePropose_: function (chatStr, tok, ai, settings) {
+    var r = CosOneOnOneSchedulingService.findThreeMutualSlots(
+      settings,
+      ai.attendeeEmail,
+      ai.durationMin,
+      ai.horizonDays
+    );
+    if (!r.ok) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
+          (r.message || r.code || 'Could not look up availability.')
+      );
+      return;
+    }
+    var slots = r.slots || [];
+    if (!slots.length) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
+          'I could not find a mutual free slot in your work hours within that window. Try a longer horizon or a shorter duration.'
+      );
+      return;
+    }
+    var tz =
+      String(settings.timezone || '').trim() || Session.getScriptTimeZone();
+    var options = [];
+    var lines = [];
+    var i;
+    for (i = 0; i < slots.length && i < 3; i++) {
+      var s = slots[i];
+      options.push({
+        attendeeEmail: ai.attendeeEmail,
+        meetingTitle: ai.meetingTitle,
+        startIso: s.start.toISOString(),
+        endIso: s.end.toISOString(),
+      });
+      lines.push(
+        String(i + 1) +
+          ') ' +
+          Utilities.formatDate(s.start, tz, 'EEE HH:mm') +
+          ' – ' +
+          Utilities.formatDate(s.end, tz, 'HH:mm') +
+          ' (sheet TZ)'
+      );
+    }
+    var props = PropertiesService.getScriptProperties();
+    var key = CosConstants.TELEGRAM_ONEONONE_PENDING_PREFIX + chatStr;
+    props.setProperty(
+      key,
+      JSON.stringify({
+        exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+        options: options,
+      })
+    );
+    var intro =
+      String(ai.replyText || '').trim() ||
+      'Here are three times that work on both calendars (within your work hours):';
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      intro +
+        '\n\n' +
+        lines.join('\n') +
+        '\n\nReply with 1, 2, or 3 to send the calendar invite.'
+    );
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ attendeeEmail: string, meetingTitle: string, startIso: string, endIso: string }} opt
+   * @param {CosSettings} settings
+   * @private
+   */
+  _executeOneOnOnePick_: function (chatStr, tok, opt, settings) {
+    var ae = String(opt.attendeeEmail || '')
+      .trim()
+      .toLowerCase();
+    var startIso = String(opt.startIso || '').trim();
+    var endIso = String(opt.endIso || '').trim();
+    var title = String(opt.meetingTitle || '1:1').trim();
+    if (!ae || !startIso || !endIso) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'That option is invalid.');
+      return;
+    }
+    var start = new Date(startIso);
+    var end = new Date(endIso);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'Invalid time.');
+      return;
+    }
+    try {
+      var cal = CosCalendarRepository.fromSettings(settings);
+      var fullTitle =
+        CosConstants.CALENDAR_JEEVES_EVENT_TITLE_PREFIX + title.substring(0, 120);
+      cal.createMeetingInviteEvent(
+        fullTitle,
+        start,
+        end,
+        ae,
+        'Scheduled via Jeeves (Telegram).'
+      );
+      var tz =
+        String(settings.timezone || '').trim() || Session.getScriptTimeZone();
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        '📅 Invite sent: ' +
+          title.substring(0, 120) +
+          '\n' +
+          Utilities.formatDate(start, tz, 'EEE HH:mm') +
+          ' – ' +
+          Utilities.formatDate(end, tz, 'HH:mm') +
+          ' (sheet TZ) · ' +
+          ae
+      );
+    } catch (e) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Could not create the invite: ' +
+          String(e.message || e).substring(0, 200)
+      );
+    }
   },
 
   /**

@@ -1208,6 +1208,63 @@ var CosTaskSchedulerService = {
       detail: sch.detail,
     };
   },
+
+  /**
+   * Earliest non-overlapping free slots within work hours (for 1:1 proposals, etc.).
+   * @param {CosWorkHoursWeek} workModel
+   * @param {string} tz
+   * @param {number} stepMin
+   * @param {number} durationMin
+   * @param {number} horizonDays
+   * @param {Date} now
+   * @param {{start:Date,end:Date}[]} busy
+   * @param {Date} minSlotStart
+   * @param {number} maxSlots 1–3 typical
+   * @returns {{start:Date,end:Date}[]}
+   */
+  findUpToFreeSlots: function (
+    workModel,
+    tz,
+    stepMin,
+    durationMin,
+    horizonDays,
+    now,
+    busy,
+    minSlotStart,
+    maxSlots
+  ) {
+    var max = Math.min(3, Math.max(1, Math.floor(Number(maxSlots) || 3)));
+    var fakeBusy = (busy || []).slice();
+    var picked = [];
+    var minStart = minSlotStart;
+    var guard = 0;
+    while (picked.length < max && guard < 80) {
+      guard++;
+      var slot = CosTaskSchedulerService._findEarliestSlot_(
+        workModel,
+        tz,
+        stepMin,
+        durationMin,
+        horizonDays,
+        now,
+        fakeBusy,
+        null,
+        minStart
+      );
+      if (!slot) {
+        break;
+      }
+      picked.push(slot);
+      fakeBusy.push({
+        start: slot.start,
+        end: slot.end,
+        id: '',
+        title: '(hold)',
+      });
+      minStart = new Date(slot.end.getTime() + 60 * 1000);
+    }
+    return picked;
+  },
 };
 
 /**

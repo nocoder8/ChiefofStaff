@@ -201,6 +201,9 @@ var CosConstants = {
   /** TGTPICK2_{chatId} → JSON pick task row after ambiguous reschedule/drop match. */
   TELEGRAM_TASK_PICK_PENDING_PREFIX: 'TGTPICK2_',
 
+  /** TG1ON1_{chatId} → JSON pending pick after 3 mutual slot options for a 1:1 invite. */
+  TELEGRAM_ONEONONE_PENDING_PREFIX: 'TG1ON1_',
+
   /** Ms: clarify / disambiguation replies stay valid this long. */
   TELEGRAM_PENDING_UI_TTL_MS: 15 * 60 * 1000,
 

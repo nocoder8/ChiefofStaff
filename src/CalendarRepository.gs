@@ -39,6 +39,33 @@ CosCalendarRepository.fromSettings = function (settings) {
 };
 
 /**
+ * Another user’s calendar (same Workspace): calendar id is typically their email.
+ * @param {string} email
+ * @returns {CosCalendarRepository|null}
+ */
+CosCalendarRepository.fromEmailOrNull = function (email) {
+  var e = String(email || '')
+    .trim()
+    .toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) {
+    return null;
+  }
+  try {
+    var cal = CalendarApp.getCalendarById(e);
+    if (!cal) {
+      return null;
+    }
+    return new CosCalendarRepository(cal);
+  } catch (err) {
+    CosLogger.warn('fromEmailOrNull: calendar not accessible', {
+      email: e,
+      error: String(err),
+    });
+    return null;
+  }
+};
+
+/**
  * @returns {string} Human-readable primary calendar name and id (for health / logs).
  */
 CosCalendarRepository.prototype.describeCalendar = function () {
@@ -157,6 +184,48 @@ CosCalendarRepository.prototype.createTaskEvent = function (
     }
   } catch (remErr) {
     CosLogger.warn('createTaskEvent: addPopupReminder failed', {
+      error: String(remErr),
+    });
+  }
+  return ev;
+};
+
+/**
+ * Creates a meeting and sends calendar invites (Workspace).
+ * @param {string} title Full title (caller may include Jeeves prefix).
+ * @param {Date} start
+ * @param {Date} end
+ * @param {string} guestEmailsCommaSeparated One or more emails, comma-separated.
+ * @param {string=} description
+ * @returns {GoogleAppsScript.Calendar.CalendarEvent}
+ */
+CosCalendarRepository.prototype.createMeetingInviteEvent = function (
+  title,
+  start,
+  end,
+  guestEmailsCommaSeparated,
+  description
+) {
+  var guests = String(guestEmailsCommaSeparated || '').trim();
+  var ev = this._cal.createEvent(String(title || 'Meeting'), start, end, {
+    guests: guests,
+    sendInvites: true,
+    description: String(description || ''),
+  });
+  try {
+    ev.setColor(CalendarApp.EventColor.PALE_GREEN);
+  } catch (colorErr) {
+    CosLogger.warn('createMeetingInviteEvent: setColor failed', {
+      error: String(colorErr),
+    });
+  }
+  try {
+    var rm = CosConstants.CALENDAR_JEEVES_POPUP_REMINDER_MINUTES_BEFORE_START;
+    if (rm >= 0) {
+      ev.addPopupReminder(rm);
+    }
+  } catch (remErr) {
+    CosLogger.warn('createMeetingInviteEvent: addPopupReminder failed', {
       error: String(remErr),
     });
   }
