@@ -29,24 +29,23 @@ var CosOneOnOneSchedulingService = {
     var now = new Date();
     var horizonEnd = cos_addCalendarDays_(now, h + 1);
     var calSelf = CosCalendarRepository.fromSettings(settings);
-    var busySelf = calSelf.listBusyIntervals(
-      cos_addCalendarDays_(now, -1),
-      horizonEnd
+    var winStart = cos_addCalendarDays_(now, -1);
+    var busySelf = calSelf.listBusyIntervals(winStart, horizonEnd);
+    var other = CosCalendarRepository.tryBusyIntervalsForAttendeeEmail(
+      email,
+      winStart,
+      horizonEnd,
+      tz
     );
-    var calOther = CosCalendarRepository.fromEmailOrNull(email);
-    if (!calOther) {
+    if (!other.ok) {
       return {
         ok: false,
         code: 'no_attendee_cal',
         message:
-          'I could not read that colleague’s calendar (check the email, or that they share availability in Workspace).',
+          'I could not read that colleague’s free/busy (check the email, Workspace calendar visibility, and that the Calendar API service is enabled in the script project).',
       };
     }
-    var busyOther = calOther.listBusyIntervals(
-      cos_addCalendarDays_(now, -1),
-      horizonEnd
-    );
-    var busy = busySelf.concat(busyOther);
+    var busy = busySelf.concat(other.busy);
     var stepMin = CosConstants.SCHEDULING_SLOT_STEP_MINUTES;
     var slots = CosTaskSchedulerService.findUpToFreeSlots(
       workModel,

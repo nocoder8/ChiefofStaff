@@ -66,6 +66,101 @@ CosCalendarRepository.fromEmailOrNull = function (email) {
 };
 
 /**
+ * Busy intervals for another user’s calendar: try event list first, then Calendar API FreeBusy.
+ * FreeBusy often works in Workspace when getCalendarById does not (no “subscribe” needed).
+ *
+ * @param {string} attendeeEmail
+ * @param {Date} start
+ * @param {Date} end
+ * @param {string} timeZone IANA
+ * @returns {{ ok: true, busy: {start:Date,end:Date,id:string,title:string}[], source: string } | { ok: false, code: string }}
+ */
+CosCalendarRepository.tryBusyIntervalsForAttendeeEmail = function (
+  attendeeEmail,
+  start,
+  end,
+  timeZone
+) {
+  var e = String(attendeeEmail || '')
+    .trim()
+    .toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) {
+    return { ok: false, code: 'bad_email' };
+  }
+  var cal = CosCalendarRepository.fromEmailOrNull(e);
+  if (cal) {
+    return {
+      ok: true,
+      busy: cal.listBusyIntervals(start, end),
+      source: 'calendar_events',
+    };
+  }
+  if (typeof Calendar === 'undefined' || !Calendar.Freebusy) {
+    CosLogger.warn('Calendar advanced service (v3) not available; enable Calendar API in Services.');
+    return { ok: false, code: 'no_advanced_calendar' };
+  }
+  try {
+    var body = Calendar.Freebusy.query({
+      resource: {
+        timeMin: start.toISOString(),
+        timeMax: end.toISOString(),
+        timeZone: String(timeZone || '').trim() || Session.getScriptTimeZone(),
+        items: [{ id: e }],
+      },
+    });
+    var calendars = body && body.calendars ? body.calendars : {};
+    var entry = calendars[e];
+    if (!entry) {
+      var k;
+      for (k in calendars) {
+        if (calendars.hasOwnProperty(k) && k.toLowerCase() === e) {
+          entry = calendars[k];
+          break;
+        }
+      }
+    }
+    if (!entry) {
+      var calKeys = Object.keys(calendars);
+      if (calKeys.length === 1) {
+        entry = calendars[calKeys[0]];
+      }
+    }
+    if (!entry) {
+      return { ok: false, code: 'freebusy_no_calendar' };
+    }
+    if (entry.errors && entry.errors.length) {
+      CosLogger.warn('FreeBusy: calendar entry has errors', {
+        email: e,
+        errors: entry.errors,
+      });
+      return { ok: false, code: 'freebusy_denied' };
+    }
+    var busyRaw = entry.busy ? entry.busy : [];
+    var out = [];
+    var i;
+    for (i = 0; i < busyRaw.length; i++) {
+      var b = busyRaw[i];
+      if (!b || !b.start || !b.end) {
+        continue;
+      }
+      out.push({
+        start: new Date(b.start),
+        end: new Date(b.end),
+        id: '',
+        title: '(busy)',
+      });
+    }
+    return { ok: true, busy: out, source: 'freebusy' };
+  } catch (err) {
+    CosLogger.warn('tryBusyIntervalsForAttendeeEmail: FreeBusy failed', {
+      email: e,
+      error: String(err),
+    });
+    return { ok: false, code: 'freebusy_failed' };
+  }
+};
+
+/**
  * @returns {string} Human-readable primary calendar name and id (for health / logs).
  */
 CosCalendarRepository.prototype.describeCalendar = function () {
