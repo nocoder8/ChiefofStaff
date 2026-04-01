@@ -627,6 +627,7 @@ var CosTaskSchedulerService = {
             tz,
             stepMin,
             dur,
+            0,
             horizonDays,
             now,
             busy,
@@ -1026,7 +1027,8 @@ var CosTaskSchedulerService = {
    * @param {string} tz
    * @param {number} stepMin
    * @param {number} durationMin
-   * @param {number} horizonDays
+   * @param {number} minDayOffset  0 = today (sheet TZ), 1 = tomorrow, …
+   * @param {number} maxDayOffset  inclusive upper day offset from today
    * @param {Date} now
    * @param {{start:Date,end:Date,id?:string,title?:string}[]} busy
    * @param {Date|null} deadline
@@ -1039,7 +1041,8 @@ var CosTaskSchedulerService = {
     tz,
     stepMin,
     durationMin,
-    horizonDays,
+    minDayOffset,
+    maxDayOffset,
     now,
     busy,
     deadline,
@@ -1047,7 +1050,9 @@ var CosTaskSchedulerService = {
   ) {
     var startYmd = cos_formatYmd_(now, tz);
     var dayOffset;
-    for (dayOffset = 0; dayOffset <= horizonDays; dayOffset++) {
+    var minOff = Math.max(0, Math.floor(Number(minDayOffset)));
+    var maxOff = Math.max(minOff, Math.floor(Number(maxDayOffset)));
+    for (dayOffset = minOff; dayOffset <= maxOff; dayOffset++) {
       var ymd = cos_ymdAddCalendarDays_(startYmd, dayOffset, tz);
       var slot = CosTaskSchedulerService._trySlotOnYmd_(
         workModel,
@@ -1215,11 +1220,13 @@ var CosTaskSchedulerService = {
    * @param {string} tz
    * @param {number} stepMin
    * @param {number} durationMin
-   * @param {number} horizonDays
+   * @param {number} horizonDays  max day offset when min/max not passed (0..horizonDays)
    * @param {Date} now
    * @param {{start:Date,end:Date}[]} busy
    * @param {Date} minSlotStart
    * @param {number} maxSlots 1–3 typical
+   * @param {number=} minDayOffset  optional; 1 = tomorrow only (with maxDayOffset)
+   * @param {number=} maxDayOffset  optional; inclusive; defaults to horizonDays
    * @returns {{start:Date,end:Date}[]}
    */
   findUpToFreeSlots: function (
@@ -1231,8 +1238,18 @@ var CosTaskSchedulerService = {
     now,
     busy,
     minSlotStart,
-    maxSlots
+    maxSlots,
+    minDayOffset,
+    maxDayOffset
   ) {
+    var minOff =
+      minDayOffset == null || minDayOffset === ''
+        ? 0
+        : Math.max(0, Math.floor(Number(minDayOffset)));
+    var maxOff =
+      maxDayOffset == null || maxDayOffset === ''
+        ? horizonDays
+        : Math.max(minOff, Math.floor(Number(maxDayOffset)));
     var max = Math.min(3, Math.max(1, Math.floor(Number(maxSlots) || 3)));
     var fakeBusy = (busy || []).slice();
     var picked = [];
@@ -1245,7 +1262,8 @@ var CosTaskSchedulerService = {
         tz,
         stepMin,
         durationMin,
-        horizonDays,
+        minOff,
+        maxOff,
         now,
         fakeBusy,
         null,

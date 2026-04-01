@@ -17,6 +17,9 @@ var CosWorkspaceDirectoryService = {
     }
     var max = Math.min(10, Math.max(1, Math.floor(Number(maxResults) || 8)));
     try {
+      // DirectorySourceType enum (not the legacy "DIRECTORY" string).
+      var srcProfile = 'DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE';
+      var srcContact = 'DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT';
       var url =
         'https://people.googleapis.com/v1/people:searchDirectoryPeople?' +
         'query=' +
@@ -24,7 +27,9 @@ var CosWorkspaceDirectoryService = {
         '&readMask=' +
         encodeURIComponent('names,emailAddresses') +
         '&sources=' +
-        encodeURIComponent('DIRECTORY') +
+        encodeURIComponent(srcProfile) +
+        '&sources=' +
+        encodeURIComponent(srcContact) +
         '&pageSize=' +
         String(max);
       var token = ScriptApp.getOAuthToken();

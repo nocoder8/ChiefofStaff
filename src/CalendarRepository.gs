@@ -100,13 +100,22 @@ CosCalendarRepository.tryBusyIntervalsForAttendeeEmail = function (
     return { ok: false, code: 'no_advanced_calendar' };
   }
   try {
+    var tMin = start instanceof Date && !isNaN(start.getTime()) ? start.toISOString() : '';
+    var tMax = end instanceof Date && !isNaN(end.getTime()) ? end.toISOString() : '';
+    if (!tMin || !tMax) {
+      CosLogger.warn('tryBusyIntervalsForAttendeeEmail: invalid window', {
+        email: e,
+        tMin: tMin,
+        tMax: tMax,
+      });
+      return { ok: false, code: 'freebusy_bad_window' };
+    }
+    // Advanced Calendar service: request body is the argument object (not nested under "resource").
     var body = Calendar.Freebusy.query({
-      resource: {
-        timeMin: start.toISOString(),
-        timeMax: end.toISOString(),
-        timeZone: String(timeZone || '').trim() || Session.getScriptTimeZone(),
-        items: [{ id: e }],
-      },
+      timeMin: tMin,
+      timeMax: tMax,
+      timeZone: String(timeZone || '').trim() || Session.getScriptTimeZone(),
+      items: [{ id: e }],
     });
     var calendars = body && body.calendars ? body.calendars : {};
     var entry = calendars[e];

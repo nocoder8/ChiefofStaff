@@ -566,6 +566,7 @@ var CosTelegramService = {
         durationMin: dir.durationMin,
         meetingTitle: dir.meetingTitle,
         horizonDays: dir.horizonDays,
+        focusDay: dir.focusDay || '',
         replyText: dir.replyText || '',
       }, settings);
       return true;
@@ -1072,6 +1073,7 @@ var CosTelegramService = {
         durationMin: ai.durationMin,
         meetingTitle: ai.meetingTitle,
         horizonDays: ai.horizonDays,
+        focusDay: ai.focusDay || '',
         replyText: ai.replyText || '',
       })
     );
@@ -1101,7 +1103,7 @@ var CosTelegramService = {
    * Mutual free time → three options; user replies 1–3 to send invites.
    * @param {string} chatStr
    * @param {string} tok
-   * @param {{ attendeeEmail?: string, attendeeName?: string, durationMin: number, meetingTitle: string, horizonDays: number, replyText?: string }} ai
+   * @param {{ attendeeEmail?: string, attendeeName?: string, durationMin: number, meetingTitle: string, horizonDays: number, focusDay?: string, replyText?: string }} ai
    * @param {CosSettings} settings
    * @private
    */
@@ -1116,11 +1118,14 @@ var CosTelegramService = {
       return;
     }
     ai = Object.assign({}, ai, { attendeeEmail: resolved.email });
+    var focusTomorrow =
+      String(ai.focusDay || '').toLowerCase() === 'tomorrow';
     var r = CosOneOnOneSchedulingService.findThreeMutualSlots(
       settings,
       ai.attendeeEmail,
       ai.durationMin,
-      ai.horizonDays
+      ai.horizonDays,
+      { focusTomorrow: focusTomorrow }
     );
     if (!r.ok) {
       CosTelegramService._replyPlain_(
@@ -1172,9 +1177,16 @@ var CosTelegramService = {
         options: options,
       })
     );
+    var noTomorrow = r.noTomorrowMatch === true;
     var intro =
       String(ai.replyText || '').trim() ||
-      'Here are three times that work on both calendars (within your work hours):';
+      (noTomorrow
+        ? 'Here are available times in the coming days that work on both calendars (within your work hours):'
+        : 'Here are three times that work on both calendars (within your work hours):');
+    if (noTomorrow) {
+      intro =
+        'There are no mutual openings tomorrow (sheet timezone).\n\n' + intro;
+    }
     CosTelegramService._replyPlain_(
       chatStr,
       tok,

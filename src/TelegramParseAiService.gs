@@ -315,7 +315,7 @@ var CosTelegramParseAiService = {
   /**
    * Schedule a 1:1 with a Workspace colleague: find mutual free time, propose 3 options.
    * @param {*} block
-   * @returns {{ ok: true, kind: string, attendeeEmail: string, durationMin: number, meetingTitle: string, horizonDays: number } | { ok: false, code: string }}
+   * @returns {{ ok: true, kind: string, attendeeEmail: string, durationMin: number, meetingTitle: string, horizonDays: number, focusDay: string } | { ok: false, code: string }}
    * @private
    */
   _normalizeProposeOneOnOne_: function (block) {
@@ -354,6 +354,10 @@ var CosTelegramParseAiService = {
     if (hd > CosConstants.SCHEDULING_HORIZON_DAYS) {
       hd = CosConstants.SCHEDULING_HORIZON_DAYS;
     }
+    var fd = String(block.focus_day || block.focusDay || '')
+      .trim()
+      .toLowerCase();
+    var focusDay = fd === 'tomorrow' ? 'tomorrow' : '';
     return {
       ok: true,
       kind: 'one_on_one_propose',
@@ -362,6 +366,7 @@ var CosTelegramParseAiService = {
       durationMin: dm,
       meetingTitle: title.substring(0, 200),
       horizonDays: hd,
+      focusDay: focusDay,
     };
   },
 
@@ -539,7 +544,7 @@ var CosTelegramParseAiService = {
       '"clarify":{"question":"","options":[{"label":"","interpretation":{"pattern":"single","single":{...}}}]},' +
       '"reschedule_named":{"title_search":"","day_phrase":"thursday"},' +
       '"drop_named":{"title_search":""},' +
-      '"propose_one_on_one":{"attendee_email":"","attendee_name":"","duration_minutes":30,"meeting_title":"","horizon_days":14},' +
+      '"propose_one_on_one":{"attendee_email":"","attendee_name":"","duration_minutes":30,"meeting_title":"","horizon_days":14,"focus_day":""},' +
       '"chat":{"reply_text":""}}';
     var body = {
       model: model,
@@ -558,7 +563,7 @@ var CosTelegramParseAiService = {
             '(3) "clarify" — use when ambiguous; provide ONE crisp question and 2–3 plausible options with label and interpretation (each interpretation pattern single or business_day_split with full fields). ' +
             '(4) "reschedule_named" — move an EXISTING task: title_search (keywords from task title), day_phrase (e.g. thursday, tomorrow, next monday, 2026-04-01). is_task_request can be true. ' +
             '(5) "drop_named" — cancel/drop EXISTING task: title_search. ' +
-            '(6) "propose_one_on_one" — schedule a meeting with a Workspace colleague: attendee_email OR attendee_name (directory lookup), duration_minutes (15–480), meeting_title, horizon_days (search window). Use when the user wants a 1:1 / sync / meeting. You do NOT book immediately; the system proposes 3 mutual free times. ' +
+            '(6) "propose_one_on_one" — schedule a meeting with a Workspace colleague: attendee_email OR attendee_name (directory lookup), duration_minutes (15–480), meeting_title, horizon_days (search window), focus_day optional: set to "tomorrow" when the user wants the meeting specifically tomorrow (sheet timezone). If tomorrow has no mutual slot, the system still proposes 3 times in the following days. ' +
             '(7) "chat" — user is chatting; set is_task_request false; return chat.reply_text and response_text; do NOT create tasks. ' +
             '(8) "none" — not a task command (is_task_request false). ' +
             'For (4)(5) do not invent task titles; use words the user said. Phrases like "next 5 days" for new recurring work → usually business_day_split. ' +
@@ -618,7 +623,7 @@ var CosTelegramParseAiService = {
       'Patterns: single (new one-off task); business_day_split (same minutes each weekday); ' +
       'clarify (ONE question + 2–3 options with label and interpretation single or business_day_split); ' +
       'reschedule_named {title_search, day_phrase like thursday|tomorrow|next monday|yyyy-MM-dd}; ' +
-      'drop_named {title_search}; propose_one_on_one {attendee_email OR attendee_name, duration_minutes, meeting_title, horizon_days}; chat {reply_text}; none. ' +
+      'drop_named {title_search}; propose_one_on_one {attendee_email OR attendee_name, duration_minutes, meeting_title, horizon_days, focus_day optional "tomorrow" when user asked for tomorrow}; chat {reply_text}; none. ' +
       'business_day_split business_day_count max ' +
       CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS +
       '. For new tasks set is_task_request true when pattern single or business_day_split. ' +

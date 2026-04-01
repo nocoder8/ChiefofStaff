@@ -8,25 +8,21 @@ var CosBootstrap = {
    * @returns {GoogleAppsScript.Spreadsheet.Spreadsheet|null}
    */
   getSpreadsheetForRun: function () {
-    var active = SpreadsheetApp.getActiveSpreadsheet();
-    if (active) {
-      return active;
-    }
     var id = PropertiesService.getScriptProperties().getProperty(
       CosConstants.PROP_KEYS.BOUND_SPREADSHEET_ID
     );
-    if (!id) {
-      return null;
+    if (id) {
+      try {
+        return SpreadsheetApp.openById(id);
+      } catch (e) {
+        CosLogger.error('getSpreadsheetForRun: openById failed', {
+          id: id,
+          error: String(e),
+        });
+      }
     }
-    try {
-      return SpreadsheetApp.openById(id);
-    } catch (e) {
-      CosLogger.error('getSpreadsheetForRun: openById failed', {
-        id: id,
-        error: String(e),
-      });
-      return null;
-    }
+    var active = SpreadsheetApp.getActiveSpreadsheet();
+    return active || null;
   },
 
   /**

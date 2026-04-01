@@ -20,6 +20,38 @@ function onOpen(e) {
 }
 
 /**
+ * One-shot OAuth: run this from the script editor (toolbar → function dropdown → Run ▶).
+ * Resolves the bound Tasks sheet, then touches Sheets, Calendar, Gmail, and UrlFetch so
+ * Google prompts for every scope in appsscript.json. Use this if trigger functions do not
+ * appear in the list or fail before authorization.
+ *
+ * Prerequisite: open Apps Script via the bound spreadsheet (Extensions → Apps Script), or
+ * run Chief of Staff → Install / Repair from the sheet menu once so BOUND_SPREADSHEET_ID exists.
+ */
+function authorizeChiefOfStaffPermissions() {
+  var ss = CosBootstrap.getSpreadsheetForRun();
+  if (!ss) {
+    throw new Error(
+      'No spreadsheet. Open the bound Tasks sheet, use Extensions → Apps Script, then run again. Or run Chief of Staff → Install / Repair from the sheet menu first.'
+    );
+  }
+  ss.getName();
+  var settings = new CosSettingsRepository().getSettings();
+  var calRepo = CosCalendarRepository.fromSettings(settings);
+  calRepo.describeCalendar();
+  try {
+    GmailApp.getInboxUnreadCount();
+  } catch (ge) {
+    Logger.log('Gmail scope (optional in this run): ' + String(ge));
+  }
+  UrlFetchApp.fetch('https://www.google.com', {
+    muteHttpExceptions: true,
+    followRedirects: true,
+  });
+  Logger.log('authorizeChiefOfStaffPermissions: OK');
+}
+
+/**
  * Chief of Staff → Install / Repair
  */
 function menuInstallChiefOfStaff() {

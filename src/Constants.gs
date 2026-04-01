@@ -351,6 +351,12 @@ var CosConstants = {
   TRIGGER_TELEGRAM_POLL_EVERY_MINUTES: 1,
 
   SCHEDULING_HORIZON_DAYS: 21,
+
+  /**
+   * When a 1:1 is requested for “tomorrow” but that day has no mutual slot, widen free/busy
+   * search to at least this many calendar days so we can propose alternatives.
+   */
+  ONE_ON_ONE_FALLBACK_MIN_DAYS: 7,
   SCHEDULING_SLOT_STEP_MINUTES: 15,
   SCHEDULE_TIME_MATCH_TOLERANCE_MS: 120000,
 

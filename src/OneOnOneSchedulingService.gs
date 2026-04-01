@@ -7,9 +7,12 @@ var CosOneOnOneSchedulingService = {
    * @param {string} attendeeEmail
    * @param {number} durationMin
    * @param {number} horizonDays
-   * @returns {{ ok: true, slots: {start:Date,end:Date}[] } | { ok: false, code: string, message?: string }}
+   * @param {{ focusTomorrow?: boolean }=} opt  When true: prefer tomorrow only first; if none, search wider and set noTomorrowMatch.
+   * @returns {{ ok: true, slots: {start:Date,end:Date}[], noTomorrowMatch?: boolean } | { ok: false, code: string, message?: string }}
    */
-  findThreeMutualSlots: function (settings, attendeeEmail, durationMin, horizonDays) {
+  findThreeMutualSlots: function (settings, attendeeEmail, durationMin, horizonDays, opt) {
+    opt = opt || {};
+    var focusTomorrow = opt.focusTomorrow === true;
     var email = String(attendeeEmail || '')
       .trim()
       .toLowerCase();
@@ -26,8 +29,15 @@ var CosOneOnOneSchedulingService = {
     if (h > CosConstants.SCHEDULING_HORIZON_DAYS) {
       h = CosConstants.SCHEDULING_HORIZON_DAYS;
     }
+    var hBusy = h;
+    if (focusTomorrow) {
+      hBusy = Math.min(
+        CosConstants.SCHEDULING_HORIZON_DAYS,
+        Math.max(h, CosConstants.ONE_ON_ONE_FALLBACK_MIN_DAYS)
+      );
+    }
     var now = new Date();
-    var horizonEnd = cos_addCalendarDays_(now, h + 1);
+    var horizonEnd = cos_addCalendarDays_(now, hBusy + 1);
     var calSelf = CosCalendarRepository.fromSettings(settings);
     var winStart = cos_addCalendarDays_(now, -1);
     var busySelf = calSelf.listBusyIntervals(winStart, horizonEnd);
@@ -47,6 +57,42 @@ var CosOneOnOneSchedulingService = {
     }
     var busy = busySelf.concat(other.busy);
     var stepMin = CosConstants.SCHEDULING_SLOT_STEP_MINUTES;
+    if (focusTomorrow) {
+      var tomorrowOnly = CosTaskSchedulerService.findUpToFreeSlots(
+        workModel,
+        tz,
+        stepMin,
+        durationMin,
+        hBusy,
+        now,
+        busy,
+        now,
+        3,
+        1,
+        1
+      );
+      if (tomorrowOnly.length) {
+        return { ok: true, slots: tomorrowOnly, noTomorrowMatch: false };
+      }
+      var wide = CosTaskSchedulerService.findUpToFreeSlots(
+        workModel,
+        tz,
+        stepMin,
+        durationMin,
+        hBusy,
+        now,
+        busy,
+        now,
+        3,
+        0,
+        hBusy
+      );
+      return {
+        ok: true,
+        slots: wide,
+        noTomorrowMatch: wide.length > 0,
+      };
+    }
     var slots = CosTaskSchedulerService.findUpToFreeSlots(
       workModel,
       tz,
