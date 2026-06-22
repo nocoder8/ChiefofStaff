@@ -1,3 +1,7 @@
 .DS_Store
 *.log
 .clasprc.json
+
+# Local imports and sensitive extracts
+*.csv
+src/ERs.txt

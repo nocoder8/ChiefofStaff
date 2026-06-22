@@ -226,6 +226,36 @@ var CosTelegramService = {
    * @param {CosSettings} settings
    * @returns {{ ok: boolean, message?: string }}
    */
+  /**
+   * Plain sendMessage to TELEGRAM_CHAT_ID (no reply thread). Used by digests / weekly reports.
+   * @param {CosSettings} settings
+   * @param {string} text
+   * @returns {{ ok: boolean, skipped?: boolean, reason?: string, message?: string }}
+   */
+  sendPlainToConfiguredChat_: function (settings, text) {
+    var tok = String(settings.telegramBotToken || '').trim();
+    var chat = String(settings.telegramChatId || '').trim();
+    if (tok.length < 10 || !chat) {
+      return { ok: true, skipped: true, reason: 'no_telegram' };
+    }
+    var body = String(text || '').trim();
+    if (!body) {
+      return { ok: true, skipped: true, reason: 'empty_text' };
+    }
+    var r = CosTelegramService._apiJson_(tok, 'sendMessage', {
+      chat_id: chat,
+      text: body.substring(0, 3900),
+      disable_web_page_preview: true,
+    });
+    if (!r.ok || !r.json || !r.json.ok) {
+      return {
+        ok: false,
+        message: r.desc || (r.json && r.json.description) || 'sendMessage failed',
+      };
+    }
+    return { ok: true };
+  },
+
   sendTestMessage_: function (settings) {
     var tok = String(settings.telegramBotToken || '').trim();
     var chat = String(settings.telegramChatId || '').trim();
@@ -329,6 +359,34 @@ var CosTelegramService = {
         desc: r.desc || r.json,
       });
     }
+  },
+
+  /**
+   * Telegram “typing…” indicator (best effort; expires after a few seconds on their side).
+   * @param {string} chatId
+   * @param {string} token
+   * @private
+   */
+  _telegramSendTyping_: function (chatId, token) {
+    CosTelegramService._apiJson_(token, 'sendChatAction', {
+      chat_id: chatId,
+      action: 'typing',
+    });
+  },
+
+  /**
+   * Immediate feedback before slow work (LLM, scheduling, sheet writes).
+   * @param {string} chatId
+   * @param {string} token
+   * @private
+   */
+  _sendProgressAckWithTyping_: function (chatId, token) {
+    CosTelegramService._telegramSendTyping_(chatId, token);
+    CosTelegramService._replyPlain_(
+      chatId,
+      token,
+      CosConstants.TELEGRAM_PROGRESS_ACK_TEXT
+    );
   },
 
   /**
@@ -436,6 +494,8 @@ var CosTelegramService = {
         priority: p.priority,
         durationMin: p.durationMin,
         notes: p.notes || '',
+        followUpContactEmail: String(p.followUpContactEmail || '').trim(),
+        followUpContactName: String(p.followUpContactName || '').trim(),
       };
     }
     if (p.kind === 'business_day_split') {
@@ -478,6 +538,8 @@ var CosTelegramService = {
           priority: pay.priority,
           durationMin: pay.durationMin,
           notes: pay.notes || '',
+          followUpContactEmail: pay.followUpContactEmail || '',
+          followUpContactName: pay.followUpContactName || '',
         },
         '',
         true
@@ -504,6 +566,188 @@ var CosTelegramService = {
   /**
    * @param {string} chatStr
    * @param {string} tok
+   * @param {string} taskId
+   * @param {string} email
+   * @param {string} displayName
+   * @param {CosSettings} settings
+   * @private
+   */
+  _applyFollowUpContactToTask_: function (
+    chatStr,
+    tok,
+    taskId,
+    email,
+    displayName,
+    settings,
+    silent
+  ) {
+    var id = String(taskId || '').trim();
+    var em = String(email || '').trim().toLowerCase();
+    if (!id || !em || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Could not save that contact — need a valid email.'
+      );
+      return;
+    }
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    if (!ss) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'Spreadsheet not reachable.');
+      return;
+    }
+    try {
+      var repo = new CosTaskRepository(ss);
+      var updated = repo.updateTask(id, {
+        followUpContactEmail: em,
+        followUpContactName: String(displayName || '').trim(),
+      });
+      if (!updated) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'That task was not found — it may have been removed.'
+        );
+        return;
+      }
+      if (!silent) {
+        CosTelegramService._replyPlain_(chatStr, tok, 'Got it. Noted.');
+      }
+      CosLogger.info('Telegram follow-up contact saved', {
+        taskId: id,
+        email: em,
+        silent: !!silent,
+      });
+    } catch (err) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Could not update the task: ' + String(err.message || err).substring(0, 200)
+      );
+      CosLogger.error('Telegram follow-up contact update failed', {
+        taskId: id,
+        error: String(err),
+      });
+    }
+  },
+
+  /**
+   * Handles free-text reply after a Telegram-sourced Follow-up task: name → directory, or email.
+   * @returns {boolean} true if consumed (including “waiting for better input” replies)
+   * @private
+   */
+  _consumeTelegramFollowUpContactReply_: function (
+    chatStr,
+    tok,
+    text,
+    settings
+  ) {
+    var props = PropertiesService.getScriptProperties();
+    var kWu = CosConstants.TELEGRAM_FOLLOWUP_CONTACT_PENDING_PREFIX + chatStr;
+    var rawWu = props.getProperty(kWu);
+    if (!rawWu) {
+      return false;
+    }
+    var now = Date.now();
+    var pend = CosTelegramService._readTimedPending_(rawWu, now, props, kWu);
+    if (!pend) {
+      return false;
+    }
+    var taskId = String(pend.taskId || '').trim();
+    if (!taskId) {
+      props.deleteProperty(kWu);
+      return false;
+    }
+    var t = String(text || '').replace(/^\s+|\s+$/g, '');
+    if (!t) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Who should we follow up with? Send a name (I’ll check your Workspace directory) or an email address.'
+      );
+      return true;
+    }
+    var lower = t.toLowerCase();
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lower)) {
+      props.deleteProperty(kWu);
+      CosTelegramService._applyFollowUpContactToTask_(
+        chatStr,
+        tok,
+        taskId,
+        lower,
+        '',
+        settings
+      );
+      return true;
+    }
+    var search = CosWorkspaceDirectoryService.searchDirectoryPeople(t, 8);
+    if (!search.ok) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        search.message ||
+          'Directory lookup failed. Try an email address, or re-authorize if prompted.'
+      );
+      return true;
+    }
+    if (!search.people || !search.people.length) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'I could not find “' +
+          t.substring(0, 80) +
+          '” in your organization directory. Try their work email.'
+      );
+      return true;
+    }
+    if (search.people.length === 1) {
+      var one = search.people[0];
+      props.deleteProperty(kWu);
+      CosTelegramService._applyFollowUpContactToTask_(
+        chatStr,
+        tok,
+        taskId,
+        one.email,
+        String(one.displayName || '').trim(),
+        settings
+      );
+      return true;
+    }
+    props.deleteProperty(kWu);
+    var list = search.people.slice(
+      0,
+      CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX
+    );
+    var kPick = CosConstants.TELEGRAM_FOLLOWUP_DIRECTORY_PICK_PREFIX + chatStr;
+    props.setProperty(
+      kPick,
+      JSON.stringify({
+        exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+        taskId: taskId,
+        candidates: list,
+      })
+    );
+    var lines = [];
+    var j;
+    for (j = 0; j < list.length; j++) {
+      var p = list[j];
+      lines.push(String(j + 1) + ') ' + p.displayName + ' — ' + p.email);
+    }
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      'I found several people. Which one?\n\n' +
+        lines.join('\n') +
+        '\n\nReply with a number 1–' +
+        String(list.length) +
+        '.'
+    );
+    return true;
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
    * @param {string} text
    * @param {CosSettings} settings
    * @returns {boolean} true if this message was consumed
@@ -513,6 +757,22 @@ var CosTelegramService = {
     var t = String(text || '').replace(/^\s+|\s+$/g, '');
     var props = PropertiesService.getScriptProperties();
     var now = Date.now();
+    var kDr = CosConstants.TELEGRAM_MEETING_DATE_RETRY_PREFIX + chatStr;
+    var rawDr = props.getProperty(kDr);
+    if (rawDr) {
+      var dr = CosTelegramService._readTimedPending_(rawDr, now, props, kDr);
+      if (dr) {
+        return CosTelegramService._consumeMeetingDateRetry_(
+          chatStr,
+          tok,
+          t,
+          dr,
+          settings,
+          props,
+          kDr
+        );
+      }
+    }
     var kCl = CosConstants.TELEGRAM_CLARIFY_PENDING_PREFIX + chatStr;
     var kPk = CosConstants.TELEGRAM_TASK_PICK_PENDING_PREFIX + chatStr;
     var rawCl = props.getProperty(kCl);
@@ -534,6 +794,43 @@ var CosTelegramService = {
       CosTelegramService._applyClarifyChoicePayload_(chatStr, tok, pay, settings);
       return true;
     }
+    var kMeet = CosConstants.TELEGRAM_MEETING_RESOLVE_PENDING_PREFIX + chatStr;
+    var rawMeet = props.getProperty(kMeet);
+    if (rawMeet) {
+      var meet = CosTelegramService._readTimedPending_(rawMeet, now, props, kMeet);
+      if (!meet) {
+        return false;
+      }
+      var nMeet = meet.candidates ? meet.candidates.length : 0;
+      if (nMeet < 1) {
+        return false;
+      }
+      var maxMeet = Math.min(
+        CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX,
+        nMeet
+      );
+      if (!new RegExp('^[1-' + String(maxMeet) + ']$').test(t)) {
+        return false;
+      }
+      var mix = parseInt(t, 10) - 1;
+      if (mix < 0 || mix >= nMeet) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Pick a number from 1 to ' + String(maxMeet) + '.'
+        );
+        return true;
+      }
+      props.deleteProperty(kMeet);
+      CosTelegramService._meetingDirectoryPickAndContinue_(
+        chatStr,
+        tok,
+        meet,
+        mix,
+        settings
+      );
+      return true;
+    }
     var kDir = CosConstants.TELEGRAM_DIRECTORY_PICK_PENDING_PREFIX + chatStr;
     var rawDir = props.getProperty(kDir);
     if (rawDir) {
@@ -545,7 +842,10 @@ var CosTelegramService = {
       if (nCand < 1) {
         return false;
       }
-      var maxPick = Math.min(5, nCand);
+      var maxPick = Math.min(
+        CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX,
+        nCand
+      );
       if (!new RegExp('^[1-' + String(maxPick) + ']$').test(t)) {
         return false;
       }
@@ -563,12 +863,54 @@ var CosTelegramService = {
       CosTelegramService._handleOneOnOnePropose_(chatStr, tok, {
         attendeeEmail: picked.email,
         attendeeName: '',
+        attendeeDisplayName: String(picked.displayName || '').trim(),
         durationMin: dir.durationMin,
         meetingTitle: dir.meetingTitle,
         horizonDays: dir.horizonDays,
         focusDay: dir.focusDay || '',
+        targetYmd: String(dir.targetYmd || '').trim(),
         replyText: dir.replyText || '',
+        slotWindow: String(dir.slotWindow || 'all').toLowerCase(),
       }, settings);
+      return true;
+    }
+    var kFwDir = CosConstants.TELEGRAM_FOLLOWUP_DIRECTORY_PICK_PREFIX + chatStr;
+    var rawFwDir = props.getProperty(kFwDir);
+    if (rawFwDir) {
+      var fwd = CosTelegramService._readTimedPending_(rawFwDir, now, props, kFwDir);
+      if (!fwd) {
+        return false;
+      }
+      var nFw = fwd.candidates ? fwd.candidates.length : 0;
+      if (nFw < 1) {
+        return false;
+      }
+      var maxFw = Math.min(
+        CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX,
+        nFw
+      );
+      if (!new RegExp('^[1-' + String(maxFw) + ']$').test(t)) {
+        return false;
+      }
+      var fix = parseInt(t, 10) - 1;
+      if (fix < 0 || fix >= nFw) {
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          'Pick a number from 1 to ' + String(maxFw) + '.'
+        );
+        return true;
+      }
+      props.deleteProperty(kFwDir);
+      var pfw = fwd.candidates[fix];
+      CosTelegramService._applyFollowUpContactToTask_(
+        chatStr,
+        tok,
+        String(fwd.taskId || '').trim(),
+        String(pfw.email || '').trim().toLowerCase(),
+        String(pfw.displayName || '').trim(),
+        settings
+      );
       return true;
     }
     var k1on1 = CosConstants.TELEGRAM_ONEONONE_PENDING_PREFIX + chatStr;
@@ -776,7 +1118,13 @@ var CosTelegramService = {
       CosTelegramService._runDropNamed_(chatStr, tok, ai, settings);
       return true;
     }
+    if (ai.kind === 'one_on_one_batch') {
+      CosTelegramService._clearOneOnOneBatchIfPresent_(chatStr);
+      CosTelegramService._handleOneOnOneBatch_(chatStr, tok, ai, settings);
+      return true;
+    }
     if (ai.kind === 'one_on_one_propose') {
+      CosTelegramService._clearOneOnOneBatchIfPresent_(chatStr);
       CosTelegramService._handleOneOnOnePropose_(chatStr, tok, ai, settings);
       return true;
     }
@@ -799,6 +1147,8 @@ var CosTelegramService = {
           priority: ai.priority,
           durationMin: ai.durationMin,
           notes: ai.notes || '',
+          followUpContactEmail: ai.followUpContactEmail || '',
+          followUpContactName: ai.followUpContactName || '',
         },
         '',
         true,
@@ -856,7 +1206,7 @@ var CosTelegramService = {
         CosTelegramService._replyPlain_(
           chatStr,
           tok,
-          'Could not parse the day. Try: tomorrow, thursday, next monday, or yyyy-MM-dd (sheet timezone).'
+          'Could not parse the day. Try: tomorrow, thursday, next monday, yyyy-MM-dd, or a calendar date like 13 April (sheet timezone).'
         );
         return;
       }
@@ -1016,52 +1366,105 @@ var CosTelegramService = {
   },
 
   /**
-   * Resolve attendee email from explicit address or Workspace directory (name).
-   * @returns {{ email: string }|null} null if already replied (error / pick list).
+   * Resolve attendee via Workspace directory when a name is present; otherwise bare email only.
+   * If both name and email appear in the model output, directory wins (names are authoritative).
+   * @returns {{ email: string, displayName?: string }|null} null if already replied (error / pick list).
    * @private
    */
   _resolveAttendeeEmailForOneOnOne_: function (chatStr, tok, ai, settings) {
-    var email = String(ai.attendeeEmail || '')
+    var emailRaw = String(ai.attendeeEmail || '')
       .trim()
       .toLowerCase();
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return { email: email };
+    var syntacticOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw);
+    var email = syntacticOk ? emailRaw : '';
+    if (
+      email &&
+      CosTelegramParseAiService._isDocumentationOrInvalidAttendeeDomain_(email)
+    ) {
+      email = '';
     }
+
     var name = String(ai.attendeeName || '')
       .replace(/\s+/g, ' ')
       .trim();
-    if (!name || name.length < 2) {
-      CosTelegramService._replyPlain_(
+    if (
+      (!name || name.length < 2) &&
+      syntacticOk &&
+      CosTelegramParseAiService._isDocumentationOrInvalidAttendeeDomain_(emailRaw)
+    ) {
+      var local = emailRaw
+        .split('@')[0]
+        .replace(/[.+_]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (local.length >= 2) {
+        name = local;
+      }
+    }
+
+    if (name.length >= 2) {
+      var search = CosWorkspaceDirectoryService.searchDirectoryPeople(name, 8);
+      return CosTelegramService._finishDirectoryResolveOneOnOne_(
         chatStr,
         tok,
-        'Please give the colleague’s email or full name so I can look them up in the directory.'
+        ai,
+        name,
+        search
       );
-      return null;
     }
-    var search = CosWorkspaceDirectoryService.searchDirectoryPeople(name, 8);
+
+    if (email) {
+      return { email: email };
+    }
+
+    CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      'Who should I schedule with? Send their name (e.g. Nicole) and I’ll look them up in your work directory. If needed you can send a work email instead.'
+    );
+    return null;
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {Object} ai
+   * @param {string} name directory query
+   * @param {{ ok: boolean, people?: {email:string,displayName:string}[], message?: string }} search
+   * @returns {{ email: string, displayName?: string }|null}
+   * @private
+   */
+  _finishDirectoryResolveOneOnOne_: function (chatStr, tok, ai, name, search) {
     if (!search.ok) {
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
         (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
           (search.message ||
-            'Directory lookup failed. Re-authorize the script if prompted, or use their full email.')
+            'Directory lookup failed. Re-authorize the script if prompted, or try a fuller name.')
       );
       return null;
     }
     if (!search.people || !search.people.length) {
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
         (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
           'I could not find “' +
           name.substring(0, 80) +
-          '” in your organization directory. Try their email address.'
+          '” in your organization directory. Try a fuller name (e.g. first and last) or their work email.'
       );
       return null;
     }
     if (search.people.length === 1) {
-      return { email: search.people[0].email };
+      var one = search.people[0];
+      return {
+        email: one.email,
+        displayName: String(one.displayName || '').trim(),
+      };
     }
     var props = PropertiesService.getScriptProperties();
     var key = CosConstants.TELEGRAM_DIRECTORY_PICK_PENDING_PREFIX + chatStr;
@@ -1069,17 +1472,25 @@ var CosTelegramService = {
       key,
       JSON.stringify({
         exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
-        candidates: search.people.slice(0, 5),
+        candidates: search.people.slice(
+          0,
+          CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX
+        ),
         durationMin: ai.durationMin,
         meetingTitle: ai.meetingTitle,
         horizonDays: ai.horizonDays,
         focusDay: ai.focusDay || '',
+        targetYmd: String(ai.targetYmd || '').trim(),
         replyText: ai.replyText || '',
+        slotWindow: String(ai.slotWindow || 'all').toLowerCase(),
       })
     );
     var lines = [];
     var j;
-    var list = search.people.slice(0, 5);
+    var list = search.people.slice(
+      0,
+      CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX
+    );
     for (j = 0; j < list.length; j++) {
       var p = list[j];
       lines.push(
@@ -1100,49 +1511,639 @@ var CosTelegramService = {
   },
 
   /**
-   * Mutual free time → three options; user replies 1–3 to send invites.
    * @param {string} chatStr
-   * @param {string} tok
-   * @param {{ attendeeEmail?: string, attendeeName?: string, durationMin: number, meetingTitle: string, horizonDays: number, focusDay?: string, replyText?: string }} ai
-   * @param {CosSettings} settings
    * @private
    */
-  _handleOneOnOnePropose_: function (chatStr, tok, ai, settings) {
-    var resolved = CosTelegramService._resolveAttendeeEmailForOneOnOne_(
-      chatStr,
-      tok,
-      ai,
-      settings
-    );
-    if (!resolved) {
-      return;
+  _clearOneOnOneBatchIfPresent_: function (chatStr) {
+    try {
+      PropertiesService.getScriptProperties().deleteProperty(
+        CosConstants.TELEGRAM_ONEONONE_BATCH_PREFIX +
+          String(chatStr || '').trim()
+      );
+    } catch (e1) {}
+  },
+
+  /**
+   * Drop batch state when a 1:1 step fails mid-sequence.
+   * @param {string} chatStr
+   * @private
+   */
+  _abortOneOnOneBatchIfActive_: function (chatStr) {
+    CosTelegramService._clearOneOnOneBatchIfPresent_(chatStr);
+  },
+
+  /**
+   * Drop alternate-date prompt so a new 1:1 command is not misread as a date reply.
+   * @param {string} chatStr
+   * @private
+   */
+  _clearMeetingDateRetryIfPresent_: function (chatStr) {
+    try {
+      PropertiesService.getScriptProperties().deleteProperty(
+        CosConstants.TELEGRAM_MEETING_DATE_RETRY_PREFIX + chatStr
+      );
+    } catch (eClr) {}
+  },
+
+  /**
+   * Turn targetDatePhrase or non-ISO targetYmd into yyyy-MM-dd (sheet TZ).
+   * @param {Object} ai
+   * @param {string} tz IANA
+   * @returns {Object}
+   * @private
+   */
+  _resolveOneOnOneTargetYmdFromPhrase_: function (ai, tz) {
+    if (!ai || typeof ai !== 'object') {
+      return ai;
     }
-    ai = Object.assign({}, ai, { attendeeEmail: resolved.email });
-    var focusTomorrow =
-      String(ai.focusDay || '').toLowerCase() === 'tomorrow';
-    var r = CosOneOnOneSchedulingService.findThreeMutualSlots(
-      settings,
-      ai.attendeeEmail,
-      ai.durationMin,
-      ai.horizonDays,
-      { focusTomorrow: focusTomorrow }
-    );
-    if (!r.ok) {
+    var y = String(ai.targetYmd || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(y)) {
+      return ai;
+    }
+    var phrase = String(ai.targetDatePhrase || '').trim();
+    if (!phrase && y) {
+      phrase = y;
+    }
+    if (!phrase) {
+      return ai;
+    }
+    var resolved = CosTelegramDayResolve.phraseToYmd(tz, phrase);
+    if (!resolved) {
+      return ai;
+    }
+    var next = Object.assign({}, ai, { targetYmd: resolved });
+    if (String(ai.focusDay || '').toLowerCase() === 'tomorrow') {
+      next.focusDay = '';
+    }
+    return next;
+  },
+
+  /**
+   * User-visible qualifier for mutual-slot intros (workhours vs evening-only).
+   * @param {string} slotWindow all|workhours|remote
+   * @returns {string}
+   * @private
+   */
+  _mutualSlotScopePhrase_: function (slotWindow) {
+    var sw = String(slotWindow || 'all').toLowerCase();
+    if (sw === 'workhours') {
+      return ' (daytime work hours only — evening block excluded)';
+    }
+    if (sw === 'remote') {
+      return ' (evening remote hours only)';
+    }
+    return ' (within your configured hours)';
+  },
+
+  /**
+   * After no slots on a chosen day: user replies next day / another date / cancel.
+   * @returns {boolean} always true when dr was valid
+   * @private
+   */
+  _consumeMeetingDateRetry_: function (
+    chatStr,
+    tok,
+    text,
+    dr,
+    settings,
+    props,
+    kDr
+  ) {
+    var t = String(text || '').replace(/^\s+|\s+$/g, '');
+    if (!t) {
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
-        (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
+        'Reply **next day** to try the day after the one we checked, send another date (e.g. 15 April), or **cancel** to stop.'
+      );
+      return true;
+    }
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    var tz =
+      String(settings.timezone || '').trim() ||
+      (ss && ss.getSpreadsheetTimeZone()) ||
+      Session.getScriptTimeZone();
+    var prevYmd = String(dr.prevTargetYmd || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(prevYmd)) {
+      try {
+        props.deleteProperty(kDr);
+      } catch (de1) {}
+      return false;
+    }
+    var lower = t.toLowerCase();
+    if (
+      /^(cancel|stop|skip)$/i.test(lower) ||
+      /^never\s+mind$/i.test(lower)
+    ) {
+      try {
+        props.deleteProperty(kDr);
+      } catch (de2) {}
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Understood — stopped looking for alternate meeting dates.'
+      );
+      return true;
+    }
+    var nextYmd = '';
+    if (
+      /^next\s+day$/i.test(t) ||
+      /^nextday$/i.test(lower) ||
+      /^the\s+next\s+day$/i.test(t) ||
+      /^following\s+day$/i.test(t) ||
+      /^day\s+after(\s+that)?$/i.test(t)
+    ) {
+      nextYmd = cos_ymdAddCalendarDays_(prevYmd, 1, tz);
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+      nextYmd = t;
+    } else {
+      nextYmd = String(CosTelegramDayResolve.phraseToYmd(tz, t) || '').trim();
+    }
+    if (!nextYmd || !/^\d{4}-\d{2}-\d{2}$/.test(nextYmd)) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Say **next day**, a specific date (e.g. 16 April or 2026-04-16), or **cancel**.'
+      );
+      return true;
+    }
+    var now = new Date();
+    var off = cos_dayOffsetFromTodayToYmd_(
+      now,
+      nextYmd,
+      tz,
+      CosConstants.SCHEDULING_HORIZON_DAYS + 400
+    );
+    if (off < 0) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'That date is in the past in your sheet timezone. Pick a future day or **next day**.'
+      );
+      return true;
+    }
+    try {
+      props.deleteProperty(kDr);
+    } catch (de3) {}
+    var people = dr.resolvedPeople || [];
+    var meta = {
+      durationMin: Math.floor(Number(dr.durationMin)) || 30,
+      meetingTitle: String(dr.meetingTitle || '1:1').substring(0, 200),
+      horizonDays: Math.floor(Number(dr.horizonDays)) || 14,
+      focusDay: String(dr.focusDay || ''),
+      targetYmd: nextYmd,
+      replyText: String(dr.replyText || ''),
+      slotWindow: String(dr.slotWindow || 'all').toLowerCase(),
+    };
+    CosTelegramService._proposeMeetingSlotsFromResolved_(
+      chatStr,
+      tok,
+      people,
+      meta,
+      settings
+    );
+    return true;
+  },
+
+  /**
+   * Sequential separate 1:1s (Telegram).
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ attendeeNames: string[], durationMin: number, meetingTitle: string, horizonDays: number, focusDay?: string, targetYmd?: string, targetDatePhrase?: string, slotWindow?: string, replyText?: string }} ai
+   * @param {CosSettings} settings
+   * @private
+   */
+  _handleOneOnOneBatch_: function (chatStr, tok, ai, settings) {
+    CosTelegramService._clearMeetingDateRetryIfPresent_(chatStr);
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    var tzBatch =
+      String(settings.timezone || '').trim() ||
+      (ss && ss.getSpreadsheetTimeZone()) ||
+      Session.getScriptTimeZone();
+    ai = CosTelegramService._resolveOneOnOneTargetYmdFromPhrase_(ai, tzBatch);
+    var names = ai.attendeeNames && ai.attendeeNames.length
+      ? ai.attendeeNames.slice()
+      : [];
+    if (names.length < 2) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Separate 1:1s need at least two people. Name them in one message (comma-separated or a list).'
+      );
+      return;
+    }
+    var props = PropertiesService.getScriptProperties();
+    var key = CosConstants.TELEGRAM_ONEONONE_BATCH_PREFIX + chatStr;
+    props.setProperty(
+      key,
+      JSON.stringify({
+        exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+        names: names,
+        currentIndex: 0,
+        durationMin: ai.durationMin,
+        meetingTitle: ai.meetingTitle,
+        horizonDays: ai.horizonDays,
+        focusDay: ai.focusDay || '',
+        targetYmd: String(ai.targetYmd || '').trim(),
+        replyText: ai.replyText || '',
+        slotWindow: String(ai.slotWindow || 'all').toLowerCase(),
+      })
+    );
+    var opener =
+      'Separate 1:1s (' +
+      String(names.length) +
+      '). First: ' +
+      names[0] +
+      '.';
+    if (String(ai.replyText || '').trim()) {
+      opener = String(ai.replyText || '').trim() + '\n\n' + opener;
+    }
+    CosTelegramService._replyPlain_(chatStr, tok, opener);
+    CosTelegramService._runBatchOneOnOneStep_(chatStr, tok, settings);
+  },
+
+  /**
+   * @private
+   */
+  _runBatchOneOnOneStep_: function (chatStr, tok, settings) {
+    var key = CosConstants.TELEGRAM_ONEONONE_BATCH_PREFIX + chatStr;
+    var props = PropertiesService.getScriptProperties();
+    var raw = props.getProperty(key);
+    var batch = CosTelegramService._readTimedPending_(
+      raw,
+      Date.now(),
+      props,
+      key
+    );
+    if (!batch || !batch.names || !batch.names.length) {
+      return;
+    }
+    var idx = Math.floor(Number(batch.currentIndex) || 0);
+    if (idx < 0 || idx >= batch.names.length) {
+      CosTelegramService._clearOneOnOneBatchIfPresent_(chatStr);
+      return;
+    }
+    var nm = String(batch.names[idx] || '').trim();
+    if (nm.length < 2) {
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+      CosTelegramService._replyPlain_(chatStr, tok, 'Invalid name in batch.');
+      return;
+    }
+    if (idx > 0) {
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        '(' +
+          String(idx + 1) +
+          '/' +
+          String(batch.names.length) +
+          ') Separate 1:1 with ' +
+          nm +
+          '…'
+      );
+    }
+    var aiOne = {
+      attendeeNames: [nm],
+      attendeeName: nm,
+      attendeeEmail: '',
+      durationMin: batch.durationMin,
+      meetingTitle: batch.meetingTitle,
+      horizonDays: batch.horizonDays,
+      focusDay: batch.focusDay || '',
+      targetYmd: String(batch.targetYmd || '').trim(),
+      replyText: batch.replyText || '',
+      slotWindow: String(batch.slotWindow || 'all').toLowerCase(),
+    };
+    CosTelegramService._handleOneOnOnePropose_(chatStr, tok, aiOne, settings);
+  },
+
+  /**
+   * After a successful calendar invite, continue batch if active.
+   * @private
+   */
+  _maybeAdvanceOneOnOneBatchAfterInvite_: function (chatStr, tok, settings) {
+    var key = CosConstants.TELEGRAM_ONEONONE_BATCH_PREFIX + chatStr;
+    var props = PropertiesService.getScriptProperties();
+    var raw = props.getProperty(key);
+    var batch = CosTelegramService._readTimedPending_(
+      raw,
+      Date.now(),
+      props,
+      key
+    );
+    if (!batch || !batch.names || !batch.names.length) {
+      return;
+    }
+    var idx = Math.floor(Number(batch.currentIndex) || 0);
+    var next = idx + 1;
+    if (next >= batch.names.length) {
+      props.deleteProperty(key);
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'All ' +
+          String(batch.names.length) +
+          ' separate 1:1 invites in this batch are sent.'
+      );
+      return;
+    }
+    props.setProperty(
+      key,
+      JSON.stringify({
+        exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+        names: batch.names,
+        currentIndex: next,
+        durationMin: batch.durationMin,
+        meetingTitle: batch.meetingTitle,
+        horizonDays: batch.horizonDays,
+        focusDay: batch.focusDay || '',
+        targetYmd: String(batch.targetYmd || '').trim(),
+        replyText: batch.replyText || '',
+        slotWindow: String(batch.slotWindow || 'all').toLowerCase(),
+      })
+    );
+    CosTelegramService._runBatchOneOnOneStep_(chatStr, tok, settings);
+  },
+
+  /**
+   * After user picks from directory for multi-guest meeting, continue resolving names or offer slots.
+   * @private
+   */
+  _meetingDirectoryPickAndContinue_: function (
+    chatStr,
+    tok,
+    md,
+    pickIndex,
+    settings
+  ) {
+    var list = md.candidates || [];
+    var picked = list[pickIndex];
+    if (!picked || !picked.email) {
+      CosTelegramService._replyPlain_(chatStr, tok, 'That pick was invalid.');
+      return;
+    }
+    var resolved = (md.resolved || []).concat([
+      {
+        email: String(picked.email).trim().toLowerCase(),
+        displayName: String(picked.displayName || '').trim(),
+      },
+    ]);
+    var idx = Math.floor(Number(md.atIndex) || 0) + 1;
+    CosTelegramService._stepMultiMeetingDirectoryResolve(
+      chatStr,
+      tok,
+      {
+        names: md.names || [],
+        atIndex: idx,
+        resolved: resolved,
+        durationMin: md.durationMin,
+        meetingTitle: md.meetingTitle,
+        horizonDays: md.horizonDays,
+        focusDay: md.focusDay || '',
+        targetYmd: String(md.targetYmd || '').trim(),
+        replyText: md.replyText || '',
+        slotWindow: String(md.slotWindow || 'all').toLowerCase(),
+      },
+      settings
+    );
+  },
+
+  /**
+   * Resolve each name in names[] via directory; on ambiguity store TELEGRAM_MEETING_RESOLVE pending.
+   * @private
+   */
+  _stepMultiMeetingDirectoryResolve: function (chatStr, tok, state, settings) {
+    var names = state.names || [];
+    var idx = Math.floor(Number(state.atIndex) || 0);
+    var resolved = state.resolved ? state.resolved.slice() : [];
+    var kMeet = CosConstants.TELEGRAM_MEETING_RESOLVE_PENDING_PREFIX + chatStr;
+    while (idx < names.length) {
+      var q = String(names[idx] || '').trim();
+      if (q.length < 2) {
+        idx++;
+        continue;
+      }
+      var search = CosWorkspaceDirectoryService.searchDirectoryPeople(q, 8);
+      if (!search.ok) {
+        CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          (String(state.replyText || '').trim() ? state.replyText + '\n\n' : '') +
+            (search.message || 'Directory lookup failed.')
+        );
+        return;
+      }
+      if (!search.people || !search.people.length) {
+        CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          (String(state.replyText || '').trim() ? state.replyText + '\n\n' : '') +
+            'I could not find “' +
+            q.substring(0, 80) +
+            '” in your organization directory. Try a fuller name.'
+        );
+        return;
+      }
+      if (search.people.length === 1) {
+        var one = search.people[0];
+        resolved.push({
+          email: String(one.email).trim().toLowerCase(),
+          displayName: String(one.displayName || '').trim(),
+        });
+        idx++;
+        continue;
+      }
+      var cand = search.people.slice(
+        0,
+        CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX
+      );
+      var props = PropertiesService.getScriptProperties();
+      props.setProperty(
+        kMeet,
+        JSON.stringify({
+          exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+          names: names,
+          atIndex: idx,
+          resolved: resolved,
+          candidates: cand,
+          durationMin: state.durationMin,
+          meetingTitle: state.meetingTitle,
+          horizonDays: state.horizonDays,
+          focusDay: state.focusDay || '',
+          targetYmd: String(state.targetYmd || '').trim(),
+          replyText: state.replyText || '',
+          slotWindow: String(state.slotWindow || 'all').toLowerCase(),
+        })
+      );
+      var lines = [];
+      var j;
+      for (j = 0; j < cand.length; j++) {
+        var p = cand[j];
+        lines.push(
+          String(j + 1) + ') ' + p.displayName + ' — ' + p.email
+        );
+      }
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (String(state.replyText || '').trim() ? state.replyText + '\n\n' : '') +
+          'Several people match “' +
+          q.substring(0, 60) +
+          '”. Which one?\n\n' +
+          lines.join('\n') +
+          '\n\nReply with a number 1–' +
+          String(cand.length) +
+          '.'
+      );
+      return;
+    }
+    try {
+      PropertiesService.getScriptProperties().deleteProperty(kMeet);
+    } catch (delE) {}
+    CosTelegramService._proposeMeetingSlotsFromResolved_(
+      chatStr,
+      tok,
+      resolved,
+      {
+        durationMin: state.durationMin,
+        meetingTitle: state.meetingTitle,
+        horizonDays: state.horizonDays,
+        focusDay: state.focusDay || '',
+        targetYmd: String(state.targetYmd || '').trim(),
+        replyText: state.replyText || '',
+        slotWindow: String(state.slotWindow || 'all').toLowerCase(),
+      },
+      settings
+    );
+  },
+
+  /**
+   * Mutual free time for one or more resolved guests → three options; user replies 1–3.
+   * @private
+   */
+  _proposeMeetingSlotsFromResolved_: function (
+    chatStr,
+    tok,
+    resolvedPeople,
+    meta,
+    settings
+  ) {
+    var emails = [];
+    var seen = {};
+    var ei;
+    for (ei = 0; ei < resolvedPeople.length; ei++) {
+      var em = String(resolvedPeople[ei].email || '')
+        .trim()
+        .toLowerCase();
+      if (em && !seen[em]) {
+        seen[em] = true;
+        emails.push(em);
+      }
+    }
+    if (!emails.length) {
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Could not determine guest emails for this meeting.'
+      );
+      return;
+    }
+    var displayBits = [];
+    for (ei = 0; ei < resolvedPeople.length; ei++) {
+      var dn = String(resolvedPeople[ei].displayName || '').trim();
+      if (dn) {
+        displayBits.push(dn);
+      }
+    }
+    var summaryStr = displayBits.join(', ');
+    var targetYmd = String(meta.targetYmd || '').trim();
+    var hasTarget = /^\d{4}-\d{2}-\d{2}$/.test(targetYmd);
+    var focusTomorrow =
+      String(meta.focusDay || '').toLowerCase() === 'tomorrow' && !hasTarget;
+    var slotWin = String(meta.slotWindow || 'all').toLowerCase();
+    var r = CosOneOnOneSchedulingService.findThreeMutualSlotsMulti(
+      settings,
+      emails,
+      meta.durationMin,
+      meta.horizonDays,
+      {
+        focusTomorrow: focusTomorrow,
+        targetYmd: hasTarget ? targetYmd : '',
+        slotWindow: slotWin,
+      }
+    );
+    if (!r.ok) {
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (String(meta.replyText || '').trim() ? meta.replyText + '\n\n' : '') +
           (r.message || r.code || 'Could not look up availability.')
       );
       return;
     }
     var slots = r.slots || [];
     if (!slots.length) {
+      if (hasTarget) {
+        var propsRetry = PropertiesService.getScriptProperties();
+        var kRetry = CosConstants.TELEGRAM_MEETING_DATE_RETRY_PREFIX + chatStr;
+        var retryPeople = [];
+        var rj;
+        for (rj = 0; rj < resolvedPeople.length; rj++) {
+          var rp = resolvedPeople[rj];
+          retryPeople.push({
+            email: String(rp.email || '')
+              .trim()
+              .toLowerCase(),
+            displayName: String(rp.displayName || '').trim(),
+          });
+        }
+        var zoneHint = '';
+        if (slotWin === 'workhours') {
+          zoneHint =
+            ' during your daytime work-hours window only (evening block excluded)';
+        } else if (slotWin === 'remote') {
+          zoneHint = ' during your evening remote-hours window only';
+        }
+        propsRetry.setProperty(
+          kRetry,
+          JSON.stringify({
+            exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+            prevTargetYmd: targetYmd,
+            resolvedPeople: retryPeople,
+            durationMin: meta.durationMin,
+            meetingTitle: meta.meetingTitle,
+            horizonDays: meta.horizonDays,
+            focusDay: meta.focusDay || '',
+            replyText: meta.replyText || '',
+            slotWindow: slotWin,
+          })
+        );
+        CosTelegramService._replyPlain_(
+          chatStr,
+          tok,
+          (String(meta.replyText || '').trim() ? meta.replyText + '\n\n' : '') +
+            'I could not find a mutual opening on ' +
+            targetYmd +
+            ' (sheet timezone)' +
+            zoneHint +
+            '.\n\n' +
+            'Reply **next day** to try the following calendar day, send another date (e.g. 15 April or 2026-04-15), or **cancel** to stop.'
+        );
+        return;
+      }
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
-        (String(ai.replyText || '').trim() ? ai.replyText + '\n\n' : '') +
-          'I could not find a mutual free slot in your work hours within that window. Try a longer horizon or a shorter duration.'
+        (String(meta.replyText || '').trim() ? meta.replyText + '\n\n' : '') +
+          'I could not find a mutual free slot' +
+          CosTelegramService._mutualSlotScopePhrase_(slotWin) +
+          ' within that window. Try a longer horizon or a shorter duration.'
       );
       return;
     }
@@ -1151,11 +2152,15 @@ var CosTelegramService = {
     var options = [];
     var lines = [];
     var i;
+    var multi = resolvedPeople.length > 1;
     for (i = 0; i < slots.length && i < 3; i++) {
       var s = slots[i];
       options.push({
-        attendeeEmail: ai.attendeeEmail,
-        meetingTitle: ai.meetingTitle,
+        attendeeEmail: emails[0],
+        attendeeEmailsCsv: emails.join(','),
+        attendeeDisplayName: summaryStr,
+        attendeeDisplaySummary: summaryStr,
+        meetingTitle: meta.meetingTitle,
         startIso: s.start.toISOString(),
         endIso: s.end.toISOString(),
       });
@@ -1177,12 +2182,40 @@ var CosTelegramService = {
         options: options,
       })
     );
-    var noTomorrow = r.noTomorrowMatch === true;
-    var intro =
-      String(ai.replyText || '').trim() ||
-      (noTomorrow
-        ? 'Here are available times in the coming days that work on both calendars (within your work hours):'
-        : 'Here are three times that work on both calendars (within your work hours):');
+    var noTomorrow = r.noTomorrowMatch === true && !hasTarget;
+    var scopePhrase = CosTelegramService._mutualSlotScopePhrase_(slotWin);
+    var intro = String(meta.replyText || '').trim();
+    if (!intro) {
+      if (hasTarget) {
+        intro = multi
+          ? 'Here are times on ' +
+            targetYmd +
+            ' (sheet TZ) that work for you and everyone on this invite' +
+            scopePhrase +
+            ':'
+          : 'Here are times on ' +
+            targetYmd +
+            ' (sheet TZ) that work on both calendars' +
+            scopePhrase +
+            ':';
+      } else if (noTomorrow) {
+        intro = multi
+          ? 'Here are available times in the coming days that work for you and everyone on this invite' +
+            scopePhrase +
+            ':'
+          : 'Here are available times in the coming days that work on both calendars' +
+            scopePhrase +
+            ':';
+      } else {
+        intro = multi
+          ? 'Here are three times that work for you and everyone on this invite' +
+            scopePhrase +
+            ':'
+          : 'Here are three times that work on both calendars' +
+            scopePhrase +
+            ':';
+      }
+    }
     if (noTomorrow) {
       intro =
         'There are no mutual openings tomorrow (sheet timezone).\n\n' + intro;
@@ -1198,20 +2231,234 @@ var CosTelegramService = {
   },
 
   /**
+   * Mutual free time → three options; user replies 1–3 to send invites.
    * @param {string} chatStr
    * @param {string} tok
-   * @param {{ attendeeEmail: string, meetingTitle: string, startIso: string, endIso: string }} opt
+   * @param {{ attendeeEmail?: string, attendeeName?: string, attendeeDisplayName?: string, attendeeNames?: string[], durationMin: number, meetingTitle: string, horizonDays: number, focusDay?: string, targetYmd?: string, targetDatePhrase?: string, replyText?: string }} ai
+   * @param {CosSettings} settings
+   * @private
+   */
+  _handleOneOnOnePropose_: function (chatStr, tok, ai, settings) {
+    CosTelegramService._clearMeetingDateRetryIfPresent_(chatStr);
+    var ss0 = CosBootstrap.getSpreadsheetForRun();
+    var tz0 =
+      String(settings.timezone || '').trim() ||
+      (ss0 && ss0.getSpreadsheetTimeZone()) ||
+      Session.getScriptTimeZone();
+    ai = CosTelegramService._resolveOneOnOneTargetYmdFromPhrase_(ai, tz0);
+    var names =
+      ai.attendeeNames && ai.attendeeNames.length
+        ? ai.attendeeNames.slice()
+        : [];
+    if (names.length >= 2) {
+      CosTelegramService._stepMultiMeetingDirectoryResolve(
+        chatStr,
+        tok,
+        {
+          names: names,
+          atIndex: 0,
+          resolved: [],
+          durationMin: ai.durationMin,
+          meetingTitle: ai.meetingTitle,
+          horizonDays: ai.horizonDays,
+          focusDay: ai.focusDay || '',
+          targetYmd: String(ai.targetYmd || '').trim(),
+          replyText: ai.replyText || '',
+          slotWindow: String(ai.slotWindow || 'all').toLowerCase(),
+        },
+        settings
+      );
+      return;
+    }
+    var resolved = CosTelegramService._resolveAttendeeEmailForOneOnOne_(
+      chatStr,
+      tok,
+      ai,
+      settings
+    );
+    if (!resolved) {
+      return;
+    }
+    var nameHint =
+      String(resolved.displayName || '').trim() ||
+      String(ai.attendeeName || '').trim();
+    CosTelegramService._proposeMeetingSlotsFromResolved_(
+      chatStr,
+      tok,
+      [{ email: resolved.email, displayName: nameHint }],
+      {
+        durationMin: ai.durationMin,
+        meetingTitle: ai.meetingTitle,
+        horizonDays: ai.horizonDays,
+        focusDay: ai.focusDay || '',
+        targetYmd: String(ai.targetYmd || '').trim(),
+        replyText: ai.replyText || '',
+        slotWindow: String(ai.slotWindow || 'all').toLowerCase(),
+      },
+      settings
+    );
+  },
+
+  /**
+   * First name from email local part (e.g. pavan.kumar → Pavan, nchaudhary → Nchaudhary).
+   * @param {string} email
+   * @returns {string}
+   * @private
+   */
+  _firstNameFromEmail_: function (email) {
+    var e = String(email || '').trim().toLowerCase();
+    var at = e.indexOf('@');
+    var local = at > 0 ? e.substring(0, at) : e;
+    var plus = local.indexOf('+');
+    if (plus > 0) {
+      local = local.substring(0, plus);
+    }
+    if (!local) {
+      return '?';
+    }
+    var parts = local.split(/[._-]+/);
+    var i;
+    for (i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      if (p.length) {
+        return p.charAt(0).toUpperCase() + p.substring(1).toLowerCase();
+      }
+    }
+    return '?';
+  },
+
+  /**
+   * First token from a directory / spoken display name (e.g. Nishant Chaudhary → Nishant).
+   * @param {string} displayName
+   * @returns {string} empty if unusable
+   * @private
+   */
+  _firstNameFromDisplayName_: function (displayName) {
+    var s = String(displayName || '').replace(/\s+/g, ' ').trim();
+    if (!s) {
+      return '';
+    }
+    var sp = s.split(/\s+/);
+    var w = String(sp[0] || '');
+    w = w.replace(/^[^a-zA-Z0-9]+/g, '').replace(/[^a-zA-Z0-9]+$/g, '');
+    if (!w) {
+      return '';
+    }
+    return w.charAt(0).toUpperCase() + w.substring(1).toLowerCase();
+  },
+
+  /**
+   * Calendar subject for Telegram 1:1 invites: "1:1 - You/Them [Scheduled by Jeeves]" (no task prefix/emoji).
+   * @param {CosSettings} settings
+   * @param {string} attendeeEmail lowercased
+   * @param {string=} attendeeDisplayHint directory display name or LLM attendee_name
+   * @returns {string}
+   * @private
+   */
+  _oneOnOneInviteCalendarTitle_: function (settings, attendeeEmail, attendeeDisplayHint) {
+    var selfMail = '';
+    try {
+      selfMail = String(Session.getActiveUser().getEmail() || '').trim();
+    } catch (e1) {
+      selfMail = '';
+    }
+    if (!selfMail) {
+      selfMail = String(settings.userEmail || '').trim();
+    }
+    var ae = String(attendeeEmail || '').trim().toLowerCase();
+    var a = CosTelegramService._selfFirstNameForOneOnOneTitle_(settings, selfMail);
+    var hint = String(attendeeDisplayHint || '').trim();
+    var fromHint = hint ? CosTelegramService._firstNameFromDisplayName_(hint) : '';
+    var b = fromHint || CosTelegramService._firstNameFromEmail_(ae);
+    var base =
+      '1:1 - ' +
+      a +
+      '/' +
+      b +
+      CosConstants.CALENDAR_ONE_ON_ONE_INVITE_TITLE_SUFFIX;
+    var maxLen = CosConstants.CALENDAR_JEEVES_EVENT_TITLE_MAX_LEN;
+    if (base.length > maxLen) {
+      return base.substring(0, maxLen);
+    }
+    return base;
+  },
+
+  /**
+   * “You” side of 1:1 title: USER_DISPLAY_FIRST_NAME if set, else first token from email local part.
+   * @param {CosSettings} settings
+   * @param {string} selfMail
+   * @returns {string}
+   * @private
+   */
+  _selfFirstNameForOneOnOneTitle_: function (settings, selfMail) {
+    var pref = String(settings.userDisplayFirstName || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (pref.length) {
+      var fromPref = CosTelegramService._firstNameFromDisplayName_(pref);
+      if (fromPref) {
+        return fromPref;
+      }
+    }
+    return CosTelegramService._firstNameFromEmail_(selfMail);
+  },
+
+  /**
+   * Calendar title for Telegram multi-guest invites (not 1:1 naming).
+   * @param {CosSettings} settings
+   * @param {{ meetingTitle?: string, attendeeDisplaySummary?: string, attendeeDisplayName?: string }} opt
+   * @returns {string}
+   * @private
+   */
+  _multiMeetingInviteCalendarTitle_: function (settings, opt) {
+    var maxLen = CosConstants.CALENDAR_JEEVES_EVENT_TITLE_MAX_LEN;
+    var suf = CosConstants.CALENDAR_ONE_ON_ONE_INVITE_TITLE_SUFFIX;
+    var mt = String(opt.meetingTitle || '').trim();
+    if (mt && !/^1:1$/i.test(mt)) {
+      var t1 = mt + suf;
+      return t1.length > maxLen ? t1.substring(0, maxLen) : t1;
+    }
+    var sum = String(
+      opt.attendeeDisplaySummary || opt.attendeeDisplayName || ''
+    ).trim();
+    var base = 'Meeting — ' + (sum || 'Guests') + suf;
+    return base.length > maxLen ? base.substring(0, maxLen) : base;
+  },
+
+  /**
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {{ attendeeEmail?: string, attendeeEmailsCsv?: string, meetingTitle?: string, startIso: string, endIso: string, attendeeDisplayName?: string, attendeeDisplaySummary?: string }} opt
    * @param {CosSettings} settings
    * @private
    */
   _executeOneOnOnePick_: function (chatStr, tok, opt, settings) {
+    var csvRaw = String(opt.attendeeEmailsCsv || '').trim();
+    var parts = csvRaw
+      ? csvRaw.split(',').map(function (x) {
+          return String(x || '')
+            .trim()
+            .toLowerCase();
+        })
+      : [];
+    var guestsList = [];
+    var pi;
+    for (pi = 0; pi < parts.length; pi++) {
+      if (parts[pi] && guestsList.indexOf(parts[pi]) < 0) {
+        guestsList.push(parts[pi]);
+      }
+    }
     var ae = String(opt.attendeeEmail || '')
       .trim()
       .toLowerCase();
+    if (!guestsList.length && ae) {
+      guestsList.push(ae);
+    }
+    var guests = guestsList.join(',');
     var startIso = String(opt.startIso || '').trim();
     var endIso = String(opt.endIso || '').trim();
-    var title = String(opt.meetingTitle || '1:1').trim();
-    if (!ae || !startIso || !endIso) {
+    if (!guests || !startIso || !endIso) {
       CosTelegramService._replyPlain_(chatStr, tok, 'That option is invalid.');
       return;
     }
@@ -1221,32 +2468,48 @@ var CosTelegramService = {
       CosTelegramService._replyPlain_(chatStr, tok, 'Invalid time.');
       return;
     }
+    var multi = guestsList.length > 1;
     try {
       var cal = CosCalendarRepository.fromSettings(settings);
-      var fullTitle =
-        CosConstants.CALENDAR_JEEVES_EVENT_TITLE_PREFIX + title.substring(0, 120);
+      var disp = String(opt.attendeeDisplayName || '').trim();
+      var fullTitle = multi
+        ? CosTelegramService._multiMeetingInviteCalendarTitle_(settings, opt)
+        : CosTelegramService._oneOnOneInviteCalendarTitle_(
+            settings,
+            guestsList[0],
+            disp
+          );
       cal.createMeetingInviteEvent(
         fullTitle,
         start,
         end,
-        ae,
+        guests,
         'Scheduled via Jeeves (Telegram).'
       );
       var tz =
         String(settings.timezone || '').trim() || Session.getScriptTimeZone();
+      var guestLine = multi
+        ? guestsList.join(', ')
+        : String(guestsList[0] || '');
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
         '📅 Invite sent: ' +
-          title.substring(0, 120) +
+          fullTitle +
           '\n' +
           Utilities.formatDate(start, tz, 'EEE HH:mm') +
           ' – ' +
           Utilities.formatDate(end, tz, 'HH:mm') +
           ' (sheet TZ) · ' +
-          ae
+          guestLine
+      );
+      CosTelegramService._maybeAdvanceOneOnOneBatchAfterInvite_(
+        chatStr,
+        tok,
+        settings
       );
     } catch (e) {
+      CosTelegramService._abortOneOnOneBatchIfActive_(chatStr);
       CosTelegramService._replyPlain_(
         chatStr,
         tok,
@@ -1428,10 +2691,162 @@ var CosTelegramService = {
   },
 
   /**
+   * After a Telegram Follow-up row exists: resolve contact from fields/title/directory or prompt.
+   * @param {string} chatStr
+   * @param {string} tok
+   * @param {CosTask} task
+   * @param {{ followUpContactEmail?: string, followUpContactName?: string }} fields
+   * @private
+   */
+  _finalizeTelegramFollowUpContact_: function (chatStr, tok, task, fields) {
+    var props = PropertiesService.getScriptProperties();
+    var kWu = CosConstants.TELEGRAM_FOLLOWUP_CONTACT_PENDING_PREFIX + chatStr;
+    var kPick = CosConstants.TELEGRAM_FOLLOWUP_DIRECTORY_PICK_PREFIX + chatStr;
+
+    var hasValidEmail = function (em) {
+      var e = String(em || '').trim().toLowerCase();
+      return e.length > 0 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+    };
+
+    var existing = String(task.followUpContactEmail || '').trim().toLowerCase();
+    if (hasValidEmail(existing)) {
+      return;
+    }
+
+    var directEmail = String((fields && fields.followUpContactEmail) || '')
+      .trim()
+      .toLowerCase();
+    if (hasValidEmail(directEmail)) {
+      var disp = String((fields && fields.followUpContactName) || '').trim();
+      CosTelegramService._applyFollowUpContactToTask_(
+        chatStr,
+        tok,
+        task.taskId,
+        directEmail,
+        disp,
+        {},
+        true
+      );
+      return;
+    }
+
+    var nameFromFields = String((fields && fields.followUpContactName) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    var nameFromTask = String(task.followUpContactName || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    var nameHint =
+      nameFromFields ||
+      nameFromTask ||
+      CosTelegramTaskCaptureParser._followUpContactNameFromTitle_(task.task);
+
+    var setWuPending = function () {
+      try {
+        props.setProperty(
+          kWu,
+          JSON.stringify({
+            exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+            taskId: task.taskId,
+          })
+        );
+      } catch (e1) {
+        CosLogger.warn('Telegram follow-up pending key not set', {
+          error: String(e1),
+        });
+      }
+    };
+
+    if (nameHint.length < 2) {
+      setWuPending();
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'Who should we follow up with? Send a name (I’ll look up your Workspace directory) or an email address.'
+      );
+      return;
+    }
+
+    var search = CosWorkspaceDirectoryService.searchDirectoryPeople(
+      nameHint,
+      8
+    );
+    if (!search.ok) {
+      setWuPending();
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        (search.message || 'Directory lookup failed.') +
+          ' Send a name or work email to attach the contact.'
+      );
+      return;
+    }
+    if (!search.people || !search.people.length) {
+      setWuPending();
+      CosTelegramService._replyPlain_(
+        chatStr,
+        tok,
+        'I could not find “' +
+          nameHint.substring(0, 80) +
+          '” in your organization directory. Send their email, or try a fuller name.'
+      );
+      return;
+    }
+    if (search.people.length === 1) {
+      var one = search.people[0];
+      CosTelegramService._applyFollowUpContactToTask_(
+        chatStr,
+        tok,
+        task.taskId,
+        one.email,
+        String(one.displayName || '').trim(),
+        {},
+        true
+      );
+      return;
+    }
+    var list = search.people.slice(
+      0,
+      CosConstants.TELEGRAM_DIRECTORY_DISAMBIG_MAX
+    );
+    try {
+      props.setProperty(
+        kPick,
+        JSON.stringify({
+          exp: Date.now() + CosConstants.TELEGRAM_PENDING_UI_TTL_MS,
+          taskId: task.taskId,
+          candidates: list,
+        })
+      );
+    } catch (e4) {
+      CosLogger.warn('Telegram follow-up directory pick not set', {
+        error: String(e4),
+      });
+    }
+    var lines = [];
+    var j;
+    for (j = 0; j < list.length; j++) {
+      var p = list[j];
+      lines.push(String(j + 1) + ') ' + p.displayName + ' — ' + p.email);
+    }
+    CosTelegramService._replyPlain_(
+      chatStr,
+      tok,
+      'I found several people matching “' +
+        nameHint.substring(0, 60) +
+        '”. Which one?\n\n' +
+        lines.join('\n') +
+        '\n\nReply with a number 1–' +
+        String(list.length) +
+        '.'
+    );
+  },
+
+  /**
    * @param {string} chatStr
    * @param {string} tok
    * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
-   * @param {{ task: string, priority: string, durationMin: string, notes?: string }} fields
+   * @param {{ task: string, priority: string, durationMin: string, notes?: string, followUpContactEmail?: string, followUpContactName?: string }} fields
    * @param {string} raw
    * @param {boolean} usedAi
    * @private
@@ -1447,13 +2862,36 @@ var CosTelegramService = {
     var replyPrefix = arguments.length >= 7 ? String(arguments[6] || '') : '';
     try {
       var repo = new CosTaskRepository(ss);
+      var fuEmail = '';
+      var fuName = '';
+      if (
+        String(fields.priority || '').trim() ===
+        CosConstants.TASK_PRIORITY.FOLLOW_UP
+      ) {
+        fuEmail = String(fields.followUpContactEmail || '')
+          .trim()
+          .toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fuEmail)) {
+          fuEmail = '';
+        }
+        fuName = String(fields.followUpContactName || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (fuName.length > 200) {
+          fuName = fuName.substring(0, 199) + '…';
+        }
+      }
       var task = repo.createTask({
         task: fields.task,
         priority: fields.priority,
         durationMin: fields.durationMin,
         source: CosConstants.TASK_SOURCE.TELEGRAM,
         notes: fields.notes || '',
+        followUpContactEmail: fuEmail,
+        followUpContactName: fuName,
       });
+      var isFollowUp =
+        String(task.priority || '').trim() === CosConstants.TASK_PRIORITY.FOLLOW_UP;
       var confirm;
       if (replyPrefix) {
         confirm =
@@ -1465,9 +2903,7 @@ var CosTelegramService = {
           task.task.substring(0, 240) +
           '\n' +
           task.priority +
-          ' · ' +
-          task.durationMin +
-          ' min';
+          (isFollowUp ? '' : ' · ' + task.durationMin + ' min');
       } else {
         confirm =
           'Task added (row ' +
@@ -1476,9 +2912,9 @@ var CosTelegramService = {
           task.task +
           '\nPriority: ' +
           task.priority +
-          '\nDuration: ' +
-          task.durationMin +
-          ' min\nSource: Telegram' +
+          (isFollowUp
+            ? '\nSource: Telegram'
+            : '\nDuration: ' + task.durationMin + ' min\nSource: Telegram') +
           (usedAi ? '\n(Interpreted with AI)' : '');
       }
       CosTelegramService._replyPlain_(chatStr, tok, confirm);
@@ -1491,6 +2927,14 @@ var CosTelegramService = {
         lastRowNumber: task.rowNumber,
         lastAtIso: new Date().toISOString(),
       });
+      if (isFollowUp) {
+        CosTelegramService._finalizeTelegramFollowUpContact_(
+          chatStr,
+          tok,
+          task,
+          fields
+        );
+      }
       CosLogger.info('Telegram task capture: created', {
         raw: raw,
         parsed: fields,
@@ -1738,6 +3182,18 @@ var CosTelegramWebhook = {
       return;
     }
 
+    if (
+      settings.telegramTaskCaptureEnabled &&
+      CosTelegramService._consumeTelegramFollowUpContactReply_(
+        chatStr,
+        tok,
+        text,
+        settings
+      )
+    ) {
+      return;
+    }
+
     if (!settings.telegramTaskCaptureEnabled) {
       if (settings.telegramClosureEnabled) {
         CosTelegramService._replyPlain_(
@@ -1749,11 +3205,21 @@ var CosTelegramWebhook = {
       return;
     }
 
+    var progressAckSent = false;
+    var sendProgressAckOnce = function () {
+      if (progressAckSent) {
+        return;
+      }
+      progressAckSent = true;
+      CosTelegramService._sendProgressAckWithTyping_(chatStr, tok);
+    };
+
     // Conversational mode: LLM-first (when enabled) + friendly chat replies.
     if (
       settings.telegramConversationalModeEnabled &&
       CosTelegramParseAiService.isEnabled_(settings)
     ) {
+      sendProgressAckOnce();
       var ctx = CosTelegramService._readChatContext_(chatStr);
       var aiConv = CosTelegramParseAiService.tryInterpretConversational(
         settings,
@@ -1800,6 +3266,7 @@ var CosTelegramWebhook = {
         );
         return;
       }
+      sendProgressAckOnce();
       CosTelegramService._handleBusinessDaySplit_(chatStr, tok, bd, ssBd);
       return;
     }
@@ -1808,6 +3275,9 @@ var CosTelegramWebhook = {
       bd.code !== 'slash' &&
       bd.code !== 'empty_or_long'
     ) {
+      if (CosTelegramParseAiService.isEnabled_(settings)) {
+        sendProgressAckOnce();
+      }
       var aiRescue = CosTelegramParseAiService.tryInterpret(settings, text);
       if (
         aiRescue.ok &&
@@ -1839,6 +3309,7 @@ var CosTelegramWebhook = {
         (parsed.code === 'no_intent' || parsed.code === 'no_title') &&
         CosTelegramParseAiService.isEnabled_(settings);
       if (tryLlm) {
+        sendProgressAckOnce();
         var ai2 = CosTelegramParseAiService.tryInterpret(settings, text);
         if (CosTelegramService._applyLlmInterpretResult_(chatStr, tok, ai2, settings)) {
           CosLogger.info('Telegram task capture: LLM after rule parse fail', {
@@ -1883,6 +3354,7 @@ var CosTelegramWebhook = {
       return;
     }
 
+    sendProgressAckOnce();
     CosTelegramService._createAndConfirmTelegramTask_(
       chatStr,
       tok,

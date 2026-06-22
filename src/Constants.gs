@@ -7,6 +7,12 @@ var CosConstants = {
   PRODUCT_NAME: 'Chief of Staff',
 
   /**
+   * Gmail "From" display name for script-sent mail (address remains the script user).
+   * Helps avoid the inbox showing "me" when sending digest to yourself.
+   */
+  ASSISTANT_EMAIL_DISPLAY_NAME: 'Jeeves',
+
+  /**
    * Calendar event title prefix for scheduler-created tasks (emoji + [Jeeves]-).
    * 🎩 = Jeeves/butler motif; alternatives: 📋 tasks, 📅 schedule, 🤖 automation.
    * Visual style: Sage via CalendarApp.EventColor.PALE_GREEN in CalendarRepository.createTaskEvent.
@@ -15,6 +21,9 @@ var CosConstants = {
 
   /** Maximum length for the full calendar title (prefix + truncated task text). */
   CALENDAR_JEEVES_EVENT_TITLE_MAX_LEN: 200,
+
+  /** Telegram 1:1 invites: title ends with this (no emoji; does not use CALENDAR_JEEVES_EVENT_TITLE_PREFIX). */
+  CALENDAR_ONE_ON_ONE_INVITE_TITLE_SUFFIX: ' [Scheduled by Jeeves]',
 
   TASKS_SHEET_NAME: 'Tasks',
   TASKS_HEADER_ROW: 1,
@@ -27,7 +36,9 @@ var CosConstants = {
   TASK_DATETIME_DISPLAY_FORMAT: 'h:mm AM/PM, d mmmm yyyy',
 
   /** 1-based column indexes matching TASK_HEADERS (datetime-like cells). */
-  DATETIME_DISPLAY_COLUMNS: Object.freeze([5, 9, 10, 13, 14, 16, 17, 20]),
+  DATETIME_DISPLAY_COLUMNS: Object.freeze([
+    5, 9, 10, 11, 12, 15, 16, 18, 19, 22, 26, 27,
+  ]),
 
   TASK_HEADERS: Object.freeze([
     'Task ID',
@@ -40,6 +51,8 @@ var CosConstants = {
     'Source Ref',
     'Scheduled Start',
     'Scheduled End',
+    'Original Scheduled Start',
+    'Original Scheduled End',
     'Calendar Event ID',
     'Notes',
     'Created At',
@@ -50,6 +63,39 @@ var CosConstants = {
     'Miss Count',
     'Last Outcome',
     'Last Nudge At',
+    'Follow-up Contact Email',
+    'Follow-up Contact Name',
+    'Reschedule Count',
+    'First Scheduled At',
+    'Completed At',
+    'Final Status',
+    'Closure Type',
+  ]),
+
+  /** Column count before performance analytics fields (for migration / health tail). */
+  TASK_HEADERS_PRE_ANALYTICS_COLUMN_COUNT: 24,
+
+  /** Terminal sheet values for analytics (Final Status column). */
+  TASK_ANALYTICS_FINAL_STATUS: Object.freeze({
+    DONE: 'Done',
+    DROPPED: 'Dropped',
+  }),
+
+  TASK_ANALYTICS_FINAL_STATUS_LIST: Object.freeze(['Done', 'Dropped']),
+
+  /** Last closure path (Closure Type column); empty allowed for legacy rows. */
+  TASK_ANALYTICS_CLOSURE_TYPE: Object.freeze({
+    DONE: 'Done',
+    RESCHEDULE: 'Reschedule',
+    LOWER: 'Lower',
+    DROP: 'Drop',
+  }),
+
+  TASK_ANALYTICS_CLOSURE_TYPE_LIST: Object.freeze([
+    'Done',
+    'Reschedule',
+    'Lower',
+    'Drop',
   ]),
 
   /** First N columns equal pre-closure schema (for sheet migration). */
@@ -121,6 +167,11 @@ var CosConstants = {
 
   PROP_KEYS: Object.freeze({
     USER_EMAIL: 'USER_EMAIL',
+    /**
+     * Optional: your first name for Telegram 1:1 invite titles (e.g. Pavan).
+     * If unset, the title uses the first token derived from your work email local part.
+     */
+    USER_DISPLAY_FIRST_NAME: 'USER_DISPLAY_FIRST_NAME',
     PRIMARY_CALENDAR_ID: 'PRIMARY_CALENDAR_ID',
     TIMEZONE: 'TIMEZONE',
     WORK_HOURS_JSON: 'WORK_HOURS_JSON',
@@ -188,7 +239,21 @@ var CosConstants = {
     TELEGRAM_USE_POLLING: 'TELEGRAM_USE_POLLING',
     /** Next getUpdates offset (last processed update_id + 1). */
     TELEGRAM_GET_UPDATES_OFFSET: 'TELEGRAM_GET_UPDATES_OFFSET',
+    /** When true, weekly Saturday 9:00 (sheet TZ) sends task performance report. */
+    WEEKLY_PERFORMANCE_REPORT_ENABLED: 'WEEKLY_PERFORMANCE_REPORT_ENABLED',
+    /** yyyy-MM-dd in spreadsheet TZ; avoids duplicate weekly sends the same local day. */
+    WEEKLY_PERFORMANCE_LAST_SENT_DATE: 'WEEKLY_PERFORMANCE_LAST_SENT_DATE',
+    /**
+     * When true, weekly Sun ~05:00 (sheet TZ) prunes RAW_TIMING_ACTIVITY + TIMING_ACTIVITY_IMPORT_LOG
+     * older than a rolling TIMING_ACTIVITY_RETENTION_DAYS calendar-day window (default 45). Set false to disable.
+     */
+    TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED: 'TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED',
+    /** Rolling calendar days of Timing activity/log rows to keep (min 7 in manual prune menu; default 45). */
+    TIMING_ACTIVITY_RETENTION_DAYS: 'TIMING_ACTIVITY_RETENTION_DAYS',
   }),
+
+  /** Default rolling keep window for Timing activity (Script Property TIMING_ACTIVITY_RETENTION_DAYS overrides). */
+  DEFAULT_TIMING_ACTIVITY_RETENTION_DAYS: 45,
 
   /**
    * Script Properties key: TGMP1_{chatId}_{messageId} → taskId (pending numeric reply).
@@ -204,11 +269,41 @@ var CosConstants = {
   /** TG1ON1_{chatId} → JSON pending pick after 3 mutual slot options for a 1:1 invite. */
   TELEGRAM_ONEONONE_PENDING_PREFIX: 'TG1ON1_',
 
+  /** TG1OBATCH_{chatId} → separate 1:1s with multiple people (sequential directory + slots). */
+  TELEGRAM_ONEONONE_BATCH_PREFIX: 'TG1OBATCH_',
+
   /** TGDIR1_{chatId} → JSON pending pick when directory search returns multiple people for a 1:1. */
   TELEGRAM_DIRECTORY_PICK_PENDING_PREFIX: 'TGDIR1_',
 
+  /** TGFWU1_{chatId} → awaiting “who to follow up with?” after Telegram Follow-up task created. */
+  TELEGRAM_FOLLOWUP_CONTACT_PENDING_PREFIX: 'TGFWU1_',
+
+  /** TGFWD1_{chatId} → directory disambiguation for follow-up contact (taskId + candidates). */
+  TELEGRAM_FOLLOWUP_DIRECTORY_PICK_PREFIX: 'TGFWD1_',
+
+  /** Max people shown when directory search returns multiple matches (must match searchDirectoryPeople page size). */
+  TELEGRAM_DIRECTORY_DISAMBIG_MAX: 8,
+
+  /** TGMTRES1_{chatId} → chained directory picks when scheduling a meeting with 2+ named attendees. */
+  TELEGRAM_MEETING_RESOLVE_PENDING_PREFIX: 'TGMTRES1_',
+
+  /** After no mutual slots on a chosen day: user may reply next day / another date. */
+  TELEGRAM_MEETING_DATE_RETRY_PREFIX: 'TG1ODR_',
+
+  /**
+   * Split “workhours” vs “remote” blocks by block start time (minutes from midnight).
+   * Default 19:00 — matches 12–17 then 19:30–23:30 in DEFAULT_WORK_HOURS_JSON.
+   */
+  WORK_HOURS_REMOTE_SPLIT_START_MINUTES: 19 * 60,
+
+  /** Max guests (excluding you) for Telegram “meeting with A and B” scheduling. */
+  TELEGRAM_MEETING_ATTENDEES_MAX: 5,
+
   /** Ms: clarify / disambiguation replies stay valid this long. */
   TELEGRAM_PENDING_UI_TTL_MS: 15 * 60 * 1000,
+
+  /** Sent immediately before LLM or heavy sheet/calendar work (one per inbound message). */
+  TELEGRAM_PROGRESS_ACK_TEXT: 'I am working on it — one moment.',
 
   /** Signed closure links remain valid this many seconds (~45 days). */
   CLOSURE_LINK_TTL_SECONDS: 45 * 24 * 60 * 60,
@@ -218,6 +313,11 @@ var CosConstants = {
    * Must not match real closure outcomes (done, reschedule, lower, drop).
    */
   CLOSURE_SIGN_ACTION_MENU: 'menu',
+
+  /**
+   * Signed action for daily digest: mark a Pending Follow-up row Done (bypasses calendar closure).
+   */
+  CLOSURE_SIGN_ACTION_DIGEST_DONE: 'digest_done',
 
   /**
    * Popup reminder N minutes before the **start** of Jeeves calendar events (Calendar API limitation).
@@ -247,7 +347,7 @@ var CosConstants = {
   /** OpenAI default when DIGEST_AI_MODEL is empty and provider is openai. */
   DEFAULT_TELEGRAM_PARSE_OPENAI_MODEL: 'gpt-4o-mini',
 
-  SCHEMA_VERSION: '2',
+  SCHEMA_VERSION: '4',
 
   DEFAULT_GMAIL_LABEL_PROCESSED: '[Jeeves]/ok',
   DEFAULT_GMAIL_LABEL_ERROR: '[Jeeves]/err',
@@ -267,7 +367,14 @@ var CosConstants = {
     '[Jeeves]/err',
   ]),
 
-  GMAIL_INGEST_MAX_THREADS: 40,
+  /** Max threads processed in one ingest run (follow-ups reserved first, then tasks). */
+  GMAIL_INGEST_MAX_THREADS: 60,
+
+  /**
+   * How many threads to page through per Jeeves label before sorting/filtering.
+   * Without this, only the first page from Gmail is seen (old labeled threads can be missed).
+   */
+  GMAIL_INGEST_MAX_LABEL_SCAN: 200,
 
   GMAIL_DURATION_LABEL_MINUTES: Object.freeze([
     ['[Jeeves]/120m', 120],
@@ -325,12 +432,6 @@ var CosConstants = {
   DEFAULT_TASK_DURATION_MINUTES: 30,
 
   /**
-   * Email-ingested tasks get Deadline set to end of day N calendar days from ingest (in sheet TZ).
-   * 0 = leave Deadline blank. Improves scheduling order without opening the sheet.
-   */
-  DEFAULT_EMAIL_TASK_DEADLINE_DAYS_FROM_NOW: 7,
-
-  /**
    * Time trigger: Gmail ingest cadence. Allowed values: 1, 5, 10, 15, 30 (Apps Script).
    */
   TRIGGER_GMAIL_EVERY_MINUTES: 30,
@@ -385,6 +486,28 @@ var CosConstants = {
   /** Calendar days in digest “Jeeves week” window (inclusive of today for range end). */
   DIGEST_JEEVES_WEEK_DAYS: 7,
 
+  /** Max RAW_TIMING_ACTIVITY data rows scanned per digest (day filter in memory). */
+  DIGEST_ABANDONED_MAX_ACTIVITY_ROWS: 12000,
+  /** Top N Timing project names shown for “what you did instead” (day-level rollup). */
+  DIGEST_ABANDONED_TOP_PROJECTS: 5,
+  /** Sample activity hierarchy lines shown under each abandoned slot. */
+  DIGEST_ABANDONED_SAMPLE_LINES: 6,
+
+  /** Max RAW_TIMING_ENTRIES data rows scanned (newest tail) for per-slot overlap with abandoned windows. */
+  DIGEST_ABANDONED_MAX_TIME_ENTRY_SCAN_ROWS: 20000,
+  /** Per abandoned window: max Timing projects (by overlap minutes) in the digest line. */
+  DIGEST_ABANDONED_SLOT_MAX_PROJECTS: 5,
+  /** Per project within a window: max distinct entry titles listed. */
+  DIGEST_ABANDONED_SLOT_MAX_TITLES_PER_PROJECT: 8,
+  /** Per abandoned slot: max RAW_TIMING_ACTIVITY line_text samples (matching slot timing_project_name). */
+  DIGEST_ABANDONED_SLOT_ACTIVITY_LINES: 12,
+
+  /** Donut chart: max segments (remainder rolls into “Other”). */
+  DIGEST_TIMING_CHART_MAX_SEGMENTS: 12,
+  /** QuickChart image width/height (px) for digest donut. */
+  DIGEST_QUICKCHART_WIDTH: 520,
+  DIGEST_QUICKCHART_HEIGHT: 340,
+
   /** Max follow-ups per digest that may call an external AI (cost/latency cap). */
   DIGEST_AI_MAX_TASKS_PER_RUN: 8,
 
@@ -411,16 +534,25 @@ var CosConstants = {
     SOURCE_REF: 8,
     SCHEDULED_START: 9,
     SCHEDULED_END: 10,
-    CALENDAR_EVENT_ID: 11,
-    NOTES: 12,
-    CREATED_AT: 13,
-    UPDATED_AT: 14,
-    CLOSURE_STATUS: 15,
-    CLOSURE_REQUESTED_AT: 16,
-    COMPLETION_TIMESTAMP: 17,
-    MISS_COUNT: 18,
-    LAST_OUTCOME: 19,
-    LAST_NUDGE_AT: 20,
+    ORIGINAL_SCHEDULED_START: 11,
+    ORIGINAL_SCHEDULED_END: 12,
+    CALENDAR_EVENT_ID: 13,
+    NOTES: 14,
+    CREATED_AT: 15,
+    UPDATED_AT: 16,
+    CLOSURE_STATUS: 17,
+    CLOSURE_REQUESTED_AT: 18,
+    COMPLETION_TIMESTAMP: 19,
+    MISS_COUNT: 20,
+    LAST_OUTCOME: 21,
+    LAST_NUDGE_AT: 22,
+    FOLLOW_UP_CONTACT_EMAIL: 23,
+    FOLLOW_UP_CONTACT_NAME: 24,
+    RESCHEDULE_COUNT: 25,
+    FIRST_SCHEDULED_AT: 26,
+    COMPLETED_AT: 27,
+    FINAL_STATUS: 28,
+    CLOSURE_TYPE: 29,
   }),
 };
 

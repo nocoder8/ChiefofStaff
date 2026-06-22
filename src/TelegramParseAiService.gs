@@ -171,6 +171,11 @@ var CosTelegramParseAiService = {
     if (pattern === 'drop_named') {
       return CosTelegramParseAiService._normalizeDropNamed_(obj.drop_named);
     }
+    if (pattern === 'one_on_one_batch') {
+      return CosTelegramParseAiService._normalizeOneOnOneBatch_(
+        obj.one_on_one_batch || obj
+      );
+    }
     if (pattern === 'propose_one_on_one' || pattern === 'one_on_one_propose') {
       return CosTelegramParseAiService._normalizeProposeOneOnOne_(
         obj.propose_one_on_one || obj.one_on_one || obj
@@ -313,6 +318,98 @@ var CosTelegramParseAiService = {
   },
 
   /**
+   * Guest names for propose_one_on_one: array from model, else single attendee_name, else split "A and B".
+   * @param {*} block
+   * @returns {string[]}
+   * @private
+   */
+  _extractAttendeeNamesList_: function (block) {
+    var maxN = CosConstants.TELEGRAM_MEETING_ATTENDEES_MAX || 5;
+    var out = [];
+    var raw = block.attendee_names || block.attendeeNames;
+    if (raw && typeof raw.length === 'number') {
+      var i;
+      for (i = 0; i < raw.length && out.length < maxN; i++) {
+        var s = String(raw[i] || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (s.length >= 2) {
+          out.push(s.substring(0, 200));
+        }
+      }
+    }
+    var single = String(block.attendee_name || block.attendeeName || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!out.length && single.length >= 2) {
+      if (single.indexOf(',') >= 0) {
+        var cparts = single.split(',');
+        var cj;
+        for (cj = 0; cj < cparts.length && out.length < maxN; cj++) {
+          var pc = String(cparts[cj] || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/^[,;\s]+|[,;\s]+$/g, '');
+          if (pc.length >= 2) {
+            out.push(pc.substring(0, 200));
+          }
+        }
+      } else if (/\s+and\s+/i.test(single)) {
+        var parts = single.split(/\s+and\s+/i);
+        var j;
+        for (j = 0; j < parts.length && out.length < maxN; j++) {
+          var p = String(parts[j] || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/^[,;\s]+|[,;\s]+$/g, '');
+          if (p.length >= 2) {
+            out.push(p.substring(0, 200));
+          }
+        }
+      } else {
+        out.push(single.substring(0, 200));
+      }
+    }
+    if (out.length > maxN) {
+      out = out.slice(0, maxN);
+    }
+    return out;
+  },
+
+  /**
+   * Domains that must not skip Workspace directory (models often emit user@example.com).
+   * @param {string} email lowercased valid address
+   * @returns {boolean}
+   * @private
+   */
+  _isDocumentationOrInvalidAttendeeDomain_: function (email) {
+    var e = String(email || '').trim().toLowerCase();
+    var at = e.lastIndexOf('@');
+    if (at < 1) {
+      return false;
+    }
+    var host = e.substring(at + 1);
+    if (
+      host === 'example.com' ||
+      host === 'example.org' ||
+      host === 'example.net' ||
+      host === 'example.edu'
+    ) {
+      return true;
+    }
+    if (host === 'test' || host === 'invalid' || host === 'localhost') {
+      return true;
+    }
+    if (host.length >= 8 && host.substring(host.length - 8) === '.invalid') {
+      return true;
+    }
+    if (host.length >= 8 && host.substring(host.length - 8) === '.example') {
+      return true;
+    }
+    return false;
+  },
+
+  /**
    * Schedule a 1:1 with a Workspace colleague: find mutual free time, propose 3 options.
    * @param {*} block
    * @returns {{ ok: true, kind: string, attendeeEmail: string, durationMin: number, meetingTitle: string, horizonDays: number, focusDay: string } | { ok: false, code: string }}
@@ -322,16 +419,32 @@ var CosTelegramParseAiService = {
     if (!block || typeof block !== 'object') {
       return { ok: false, code: 'bad_1on1' };
     }
+    var attendeeNames = CosTelegramParseAiService._extractAttendeeNamesList_(
+      block
+    );
     var email = String(block.attendee_email || block.attendeeEmail || '')
       .trim()
       .toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       email = '';
     }
-    var name = String(block.attendee_name || block.attendeeName || '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!email && (!name || name.length < 2)) {
+    if (
+      email &&
+      CosTelegramParseAiService._isDocumentationOrInvalidAttendeeDomain_(email)
+    ) {
+      if (!attendeeNames.length) {
+        var local = email
+          .split('@')[0]
+          .replace(/[.+_]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (local.length >= 2) {
+          attendeeNames = [local.substring(0, 200)];
+        }
+      }
+      email = '';
+    }
+    if (!attendeeNames.length && !email) {
       return { ok: false, code: 'bad_1on1' };
     }
     var dm = parseInt(
@@ -358,16 +471,173 @@ var CosTelegramParseAiService = {
       .trim()
       .toLowerCase();
     var focusDay = fd === 'tomorrow' ? 'tomorrow' : '';
+    if (attendeeNames.length >= 1) {
+      email = '';
+    }
+    var displayNameField = '';
+    if (attendeeNames.length === 1) {
+      displayNameField = attendeeNames[0].substring(0, 200);
+    } else if (attendeeNames.length > 1) {
+      displayNameField = attendeeNames.join(', ').substring(0, 200);
+    }
+    var targetYmd = CosTelegramParseAiService._parseTargetYmdFromBlock_(block);
+    var targetDatePhrase =
+      CosTelegramParseAiService._collectLooseTargetDatePhraseFromBlock_(block);
+    if (targetYmd && focusDay === 'tomorrow') {
+      focusDay = '';
+    }
+    var slotWindow = CosTelegramParseAiService._normalizeSlotWindowFromBlock_(
+      block
+    );
     return {
       ok: true,
       kind: 'one_on_one_propose',
       attendeeEmail: email,
-      attendeeName: name.substring(0, 200),
+      attendeeName: displayNameField,
+      attendeeNames: attendeeNames,
       durationMin: dm,
       meetingTitle: title.substring(0, 200),
       horizonDays: hd,
       focusDay: focusDay,
+      targetYmd: targetYmd,
+      targetDatePhrase: targetDatePhrase,
+      slotWindow: slotWindow,
     };
+  },
+
+  /**
+   * @param {*} block
+   * @returns {string} yyyy-MM-dd or ""
+   * @private
+   */
+  _parseTargetYmdFromBlock_: function (block) {
+    var a = String(block.target_ymd || block.targetYmd || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(a)) {
+      return a;
+    }
+    var b = String(block.target_date || block.targetDate || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(b)) {
+      return b;
+    }
+    return '';
+  },
+
+  /**
+   * Non-ISO date text from the model (resolved later with sheet TZ in TelegramService).
+   * Prefers explicit target_date over a non-ISO target_ymd.
+   * @param {*} block
+   * @returns {string}
+   * @private
+   */
+  _collectLooseTargetDatePhraseFromBlock_: function (block) {
+    var iso = /^\d{4}-\d{2}-\d{2}$/;
+    var tExtra = String(
+      block.target_date || block.targetDate || block.target_date_phrase || ''
+    ).trim();
+    if (tExtra && !iso.test(tExtra)) {
+      return tExtra;
+    }
+    var tY = String(block.target_ymd || block.targetYmd || '').trim();
+    if (tY && !iso.test(tY)) {
+      return tY;
+    }
+    return '';
+  },
+
+  /**
+   * Separate 1:1s with each person (not one group invite). Requires ≥2 names.
+   * @param {*} block
+   * @returns {Object}
+   * @private
+   */
+  _normalizeOneOnOneBatch_: function (block) {
+    if (!block || typeof block !== 'object') {
+      return { ok: false, code: 'bad_batch' };
+    }
+    var attendeeNames = CosTelegramParseAiService._extractAttendeeNamesList_(
+      block
+    );
+    if (attendeeNames.length < 2) {
+      return { ok: false, code: 'bad_batch' };
+    }
+    var dm = parseInt(
+      String(block.duration_minutes || block.durationMin || '30'),
+      10
+    );
+    if (isNaN(dm) || dm < 15 || dm > 480) {
+      dm = 30;
+    }
+    var title = CosTelegramParseAiService._cleanTitle_(
+      block.meeting_title || block.meetingTitle || '1:1'
+    );
+    if (!title || title.length < 2) {
+      title = '1:1';
+    }
+    var hd = parseInt(String(block.horizon_days || block.horizonDays || '14'), 10);
+    if (isNaN(hd) || hd < 1) {
+      hd = 14;
+    }
+    if (hd > CosConstants.SCHEDULING_HORIZON_DAYS) {
+      hd = CosConstants.SCHEDULING_HORIZON_DAYS;
+    }
+    var fd = String(block.focus_day || block.focusDay || '')
+      .trim()
+      .toLowerCase();
+    var focusDay = fd === 'tomorrow' ? 'tomorrow' : '';
+    var targetYmd = CosTelegramParseAiService._parseTargetYmdFromBlock_(block);
+    var targetDatePhrase =
+      CosTelegramParseAiService._collectLooseTargetDatePhraseFromBlock_(block);
+    if (targetYmd && focusDay === 'tomorrow') {
+      focusDay = '';
+    }
+    var slotWindowB = CosTelegramParseAiService._normalizeSlotWindowFromBlock_(
+      block
+    );
+    return {
+      ok: true,
+      kind: 'one_on_one_batch',
+      attendeeNames: attendeeNames,
+      durationMin: dm,
+      meetingTitle: title.substring(0, 200),
+      horizonDays: hd,
+      focusDay: focusDay,
+      targetYmd: targetYmd,
+      targetDatePhrase: targetDatePhrase,
+      slotWindow: slotWindowB,
+    };
+  },
+
+  /**
+   * @param {*} block
+   * @returns {'all'|'workhours'|'remote'}
+   * @private
+   */
+  _normalizeSlotWindowFromBlock_: function (block) {
+    var s = String(block.slot_window || block.slotWindow || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '_');
+    if (
+      s === 'workhours' ||
+      s === 'work_hours' ||
+      s === 'work' ||
+      s === 'day' ||
+      s === 'daytime' ||
+      s === 'office' ||
+      s === 'during_work_hours'
+    ) {
+      return 'workhours';
+    }
+    if (
+      s === 'remote' ||
+      s === 'evening' ||
+      s === 'evenings' ||
+      s === 'night' ||
+      s === 'nights'
+    ) {
+      return 'remote';
+    }
+    return 'all';
   },
 
   /**
@@ -458,6 +728,49 @@ var CosTelegramParseAiService = {
     if (!title || title.length < 2) {
       return { ok: false, code: 'bad_title' };
     }
+    var pr = CosTelegramParseAiService._normalizePriority_(
+      block.priority,
+      CosConstants.TASK_PRIORITY.P2
+    );
+    if (pr === CosConstants.TASK_PRIORITY.FOLLOW_UP) {
+      var notesFu = String(block.notes || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (notesFu.length > 2000) {
+        notesFu = notesFu.substring(0, 1999) + '…';
+      }
+      var fuEmail = String(
+        block.follow_up_contact_email || block.followUpContactEmail || ''
+      )
+        .trim()
+        .toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fuEmail)) {
+        fuEmail = '';
+      }
+      var fuName = String(
+        block.follow_up_contact_name ||
+          block.followUpContactName ||
+          block.contact_name ||
+          ''
+      )
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (fuName.length > 120) {
+        fuName = fuName.substring(0, 119) + '…';
+      }
+      return {
+        ok: true,
+        kind: 'single',
+        task: title.substring(0, CosTelegramTaskCaptureParser.MAX_TITLE_LEN),
+        priority: pr,
+        durationMin: '',
+        notes: notesFu,
+        followUpContactEmail: fuEmail,
+        followUpContactName: fuName,
+      };
+    }
     var dm = block.duration_minutes;
     if (dm === undefined || dm === null || dm === '') {
       dm = CosConstants.DEFAULT_TASK_DURATION_MINUTES;
@@ -466,10 +779,6 @@ var CosTelegramParseAiService = {
     if (isNaN(minutes) || minutes < 5 || minutes > 480) {
       return { ok: false, code: 'bad_duration' };
     }
-    var pr = CosTelegramParseAiService._normalizePriority_(
-      block.priority,
-      CosConstants.TASK_PRIORITY.P2
-    );
     var notes = String(block.notes || '')
       .replace(/\r?\n/g, ' ')
       .replace(/\s+/g, ' ')
@@ -537,14 +846,16 @@ var CosTelegramParseAiService = {
     var ctx = arguments.length >= 3 ? String(arguments[2] || '') : '';
     var conversational = arguments.length >= 4 ? arguments[3] === true : false;
     var schemaHint =
-      '{"pattern":"single"|"business_day_split"|"clarify"|"reschedule_named"|"drop_named"|"propose_one_on_one"|"chat"|"none",' +
+      '{"pattern":"single"|"business_day_split"|"clarify"|"reschedule_named"|"drop_named"|"propose_one_on_one"|"one_on_one_batch"|"chat"|"none",' +
       '"is_task_request":true|false,' +
       '"response_text":"(butler reply to user)",' +
-      '"single":{...},"business_day_split":{...},' +
+      '"single":{title,priority,notes?,duration_minutes?,follow_up_contact_email?,follow_up_contact_name?},' +
+      '"business_day_split":{...},' +
       '"clarify":{"question":"","options":[{"label":"","interpretation":{"pattern":"single","single":{...}}}]},' +
       '"reschedule_named":{"title_search":"","day_phrase":"thursday"},' +
       '"drop_named":{"title_search":""},' +
-      '"propose_one_on_one":{"attendee_email":"","attendee_name":"","duration_minutes":30,"meeting_title":"","horizon_days":14,"focus_day":""},' +
+      '"propose_one_on_one":{"attendee_email":"","attendee_name":"","attendee_names":[],"duration_minutes":30,"meeting_title":"","horizon_days":14,"focus_day":"","target_ymd":"","target_date":"","slot_window":""},' +
+      '"one_on_one_batch":{"attendee_names":[],"duration_minutes":30,"meeting_title":"","horizon_days":14,"focus_day":"","target_ymd":"","target_date":"","slot_window":""},' +
       '"chat":{"reply_text":""}}';
     var body = {
       model: model,
@@ -556,16 +867,17 @@ var CosTelegramParseAiService = {
               ? 'You are Jeeves, a warm and competent butler for a personal task scheduler (Google Sheet + calendar). Output ONE JSON object only, no markdown. Always include response_text: a short, friendly reply in Jeeves tone. '
               : 'You interpret Telegram messages for a personal task scheduler (Google Sheet + calendar). Output ONE JSON object only, no markdown. ') +
             'Patterns: ' +
-            '(1) "single" — one new task: is_task_request true; title, priority P0|P1|P2|P3|Follow-up, duration_minutes 5–480, notes optional. ' +
+            '(1) "single" — one new task: is_task_request true; title, priority P0|P1|P2|P3|Follow-up, notes optional. For P0–P3 include duration_minutes 5–480. For Follow-up omit duration_minutes (digest-only, not calendar). When the user names who to follow up with, set follow_up_contact_name and/or follow_up_contact_email on single (directory lookup uses the name). ' +
             '(2) "business_day_split" — same minutes each weekday Mon–Fri: base_title, minutes_per_day, business_day_count 1–' +
             CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS +
             ', start_anchor next_day|today, priority. ' +
             '(3) "clarify" — use when ambiguous; provide ONE crisp question and 2–3 plausible options with label and interpretation (each interpretation pattern single or business_day_split with full fields). ' +
-            '(4) "reschedule_named" — move an EXISTING task: title_search (keywords from task title), day_phrase (e.g. thursday, tomorrow, next monday, 2026-04-01). is_task_request can be true. ' +
+            '(4) "reschedule_named" — move an EXISTING task: title_search (keywords from task title), day_phrase (e.g. thursday, tomorrow, next monday, yyyy-MM-dd, or 13 April / April 13 in sheet timezone). is_task_request can be true. ' +
             '(5) "drop_named" — cancel/drop EXISTING task: title_search. ' +
-            '(6) "propose_one_on_one" — schedule a meeting with a Workspace colleague: attendee_email OR attendee_name (directory lookup), duration_minutes (15–480), meeting_title, horizon_days (search window), focus_day optional: set to "tomorrow" when the user wants the meeting specifically tomorrow (sheet timezone). If tomorrow has no mutual slot, the system still proposes 3 times in the following days. ' +
-            '(7) "chat" — user is chatting; set is_task_request false; return chat.reply_text and response_text; do NOT create tasks. ' +
-            '(8) "none" — not a task command (is_task_request false). ' +
+            '(6) "propose_one_on_one" — one calendar invite: one person (attendee_name) OR one meeting with several guests (attendee_names array OR comma/"and" in attendee_name). Never invent emails. target_ymd optional: yyyy-MM-dd or a calendar phrase (e.g. 13 April, April 13) in sheet timezone when user names a specific day (omit focus_day tomorrow if set). Optional target_date for the same phrase if needed. slot_window optional: empty or all (default), workhours when user wants daytime/office hours only (exclude evening remote block), remote for evening-only. duration_minutes, meeting_title, horizon_days, focus_day optional tomorrow. ' +
+            '(7) "one_on_one_batch" — user wants SEPARATE 1:1 meetings with each person (e.g. "1:1 with A, B, and C" meaning three invites). attendee_names array (or comma-separated names). Same optional target_ymd / target_date, slot_window (workhours = daytime only), duration_minutes, meeting_title, horizon_days, focus_day. Do NOT use batch for one group meeting with everyone at once (use propose_one_on_one). ' +
+            '(8) "chat" — user is chatting; set is_task_request false; return chat.reply_text and response_text; do NOT create tasks. ' +
+            '(9) "none" — not a task command (is_task_request false). ' +
             'For (4)(5) do not invent task titles; use words the user said. Phrases like "next 5 days" for new recurring work → usually business_day_split. ' +
             (ctx ? 'Context JSON (recent chat state; may be empty): ' + ctx + ' ' : '') +
             'Example schema: ' +
@@ -620,10 +932,12 @@ var CosTelegramParseAiService = {
       (conversational
         ? 'You are Jeeves, a warm and competent butler for a task scheduler (sheet + calendar). JSON only, no markdown. Always include response_text (short, friendly). '
         : 'You interpret Telegram for a task scheduler (sheet + calendar). JSON only, no markdown. ') +
-      'Patterns: single (new one-off task); business_day_split (same minutes each weekday); ' +
+      'Patterns: single (new task: P0–P3 include duration_minutes 5–480; Follow-up omit duration_minutes; for Follow-up set follow_up_contact_name and/or follow_up_contact_email when user names the person); business_day_split (same minutes each weekday); ' +
       'clarify (ONE question + 2–3 options with label and interpretation single or business_day_split); ' +
-      'reschedule_named {title_search, day_phrase like thursday|tomorrow|next monday|yyyy-MM-dd}; ' +
-      'drop_named {title_search}; propose_one_on_one {attendee_email OR attendee_name, duration_minutes, meeting_title, horizon_days, focus_day optional "tomorrow" when user asked for tomorrow}; chat {reply_text}; none. ' +
+      'reschedule_named {title_search, day_phrase: thursday|tomorrow|next monday|yyyy-MM-dd|13 April|April 13}; ' +
+      'drop_named {title_search}; propose_one_on_one {one invite: attendee_name or attendee_names for group meeting; target_ymd or target_date; slot_window all|workhours|remote when user restricts daytime vs evening; never invent emails; max ' +
+      CosConstants.TELEGRAM_MEETING_ATTENDEES_MAX +
+      ' guests; duration_minutes, meeting_title, horizon_days, focus_day optional tomorrow}; one_on_one_batch {separate 1:1s: attendee_names; target_ymd or target_date; slot_window workhours when user says during work hours / daytime only; not for one joint meeting}; chat {reply_text}; none. ' +
       'business_day_split business_day_count max ' +
       CosConstants.TELEGRAM_BUSINESS_DAY_SPLIT_MAX_DAYS +
       '. For new tasks set is_task_request true when pattern single or business_day_split. ' +

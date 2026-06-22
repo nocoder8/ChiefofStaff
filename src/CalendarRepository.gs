@@ -337,6 +337,87 @@ CosCalendarRepository.prototype.createMeetingInviteEvent = function (
 };
 
 /**
+ * Calendar ID for Calendar API v3 (Events.get). "primary" = authenticated user’s main calendar.
+ * @param {CosSettings} settings
+ * @returns {string}
+ */
+CosCalendarRepository.getAdvancedApiCalendarId = function (settings) {
+  var id =
+    String(settings.primaryCalendarId || '').trim() ||
+    String(settings.userEmail || '').trim();
+  return id || 'primary';
+};
+
+/**
+ * Uses Calendar API v3 so deleted/trashed/cancelled events are not mistaken for live ones
+ * (CalendarApp.getEventById can still return trashed events).
+ *
+ * @param {string} calendarId Email, opaque calendar id, or "primary"
+ * @param {string} eventId Event id as stored on the task row
+ * @returns {{ kind: 'missing' } | { kind: 'cancelled', resource: Object } | { kind: 'active', resource: Object } | { kind: 'unavailable' }}
+ */
+CosCalendarRepository.resolveLinkedEventForSync = function (
+  calendarId,
+  eventId
+) {
+  if (typeof Calendar === 'undefined' || !Calendar.Events) {
+    return { kind: 'unavailable' };
+  }
+  var cid = String(calendarId || '').trim() || 'primary';
+  var eid = String(eventId || '').trim();
+  if (!eid) {
+    return { kind: 'missing' };
+  }
+  try {
+    var res = Calendar.Events.get(cid, eid);
+    if (!res || !res.id) {
+      return { kind: 'missing' };
+    }
+    if (String(res.status || '').toLowerCase() === 'cancelled') {
+      return { kind: 'cancelled', resource: res };
+    }
+    return { kind: 'active', resource: res };
+  } catch (err) {
+    var msg = String(err);
+    if (/404|not found|Not Found|Requested entity was not found/i.test(msg)) {
+      return { kind: 'missing' };
+    }
+    CosLogger.warn('Calendar.Events.get failed (Jeeves sync fallback to CalendarApp)', {
+      calendarId: cid,
+      eventId: eid,
+      error: msg,
+    });
+    return { kind: 'unavailable' };
+  }
+};
+
+/**
+ * @param {Object} resource Calendar API Event resource
+ * @returns {{ start: Date|null, end: Date|null }}
+ * @private
+ */
+CosCalendarRepository.parseEventStartEndFromApiResource_ = function (resource) {
+  if (!resource || !resource.start || !resource.end) {
+    return { start: null, end: null };
+  }
+  function parsePart(p) {
+    if (p.dateTime) {
+      var d = new Date(String(p.dateTime));
+      return isNaN(d.getTime()) ? null : d;
+    }
+    if (p.date) {
+      var d2 = new Date(String(p.date) + 'T12:00:00.000Z');
+      return isNaN(d2.getTime()) ? null : d2;
+    }
+    return null;
+  }
+  return {
+    start: parsePart(resource.start),
+    end: parsePart(resource.end),
+  };
+};
+
+/**
  * @param {string} eventId
  * @returns {GoogleAppsScript.Calendar.CalendarEvent|null}
  */

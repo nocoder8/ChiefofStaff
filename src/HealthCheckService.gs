@@ -64,6 +64,7 @@ var CosHealthCheckService = {
           emailTasksEnabled: settings.emailTasksEnabled,
           dailyDigestEnabled: settings.dailyDigestEnabled,
           schedulePendingTriggerEnabled: settings.schedulePendingTriggerEnabled,
+          weeklyPerformanceReportEnabled: settings.weeklyPerformanceReportEnabled,
         },
       });
     } catch (se) {
@@ -112,6 +113,7 @@ var CosHealthCheckService = {
     }
 
     var taskRepo = new CosTaskRepository(ss);
+    CosHealthCheckService._checkTasksAnalyticsColumns_(items, ss);
     var v = taskRepo.validateSheet();
     if (!v.ok) {
       items.push({
@@ -202,6 +204,67 @@ var CosHealthCheckService = {
    * @param {CosSettings} settings
    * @private
    */
+  /**
+   * Warn when performance analytics columns are missing (pre-migration sheet).
+   * @param {CosHealthCheckItem[]} items
+   * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+   * @private
+   */
+  _checkTasksAnalyticsColumns_: function (items, ss) {
+    var sheet = ss.getSheetByName(CosConstants.TASKS_SHEET_NAME);
+    if (!sheet) {
+      return;
+    }
+    var need = CosConstants.TASK_HEADERS.length;
+    var lastCol = sheet.getLastColumn();
+    if (lastCol < need) {
+      items.push({
+        id: 'tasks_analytics_columns',
+        status: 'warn',
+        message:
+          'Tasks sheet has ' +
+            lastCol +
+            ' column(s); expected ' +
+            need +
+            ' for performance analytics. Run Chief of Staff → Install / Repair to expand.',
+        detail: { lastColumn: lastCol, expected: need },
+      });
+      return;
+    }
+    var tail = CosConstants.TASK_HEADERS.slice(
+      CosConstants.TASK_HEADERS_PRE_ANALYTICS_COLUMN_COUNT
+    );
+    var row = sheet
+      .getRange(1, CosConstants.TASK_HEADERS_PRE_ANALYTICS_COLUMN_COUNT + 1, 1, need)
+      .getValues()[0]
+      .map(function (c) {
+        return String(c).trim();
+      });
+    var i;
+    for (i = 0; i < tail.length; i++) {
+      if (row[i] !== tail[i]) {
+        items.push({
+          id: 'tasks_analytics_columns',
+          status: 'warn',
+          message:
+            'Performance analytics header mismatch at column ' +
+            (CosConstants.TASK_HEADERS_PRE_ANALYTICS_COLUMN_COUNT + i + 1) +
+            ': expected "' +
+            tail[i] +
+            '". Run Install / Repair after backing up the sheet.',
+          detail: { column: CosConstants.TASK_HEADERS_PRE_ANALYTICS_COLUMN_COUNT + i + 1 },
+        });
+        return;
+      }
+    }
+    items.push({
+      id: 'tasks_analytics_columns',
+      status: 'pass',
+      message:
+        'Performance analytics columns present (Reschedule Count … Closure Type).',
+    });
+  },
+
   _checkTelegramClosure_: function (items, settings) {
     if (!settings.telegramClosureEnabled && !settings.telegramTaskCaptureEnabled) {
       items.push({
@@ -334,6 +397,12 @@ var CosHealthCheckService = {
     var telegramPollN = CosHealthCheckService._triggerCount_(
       CosTriggerService.HANDLER_TELEGRAM_POLL
     );
+    var weeklyPerfN = CosHealthCheckService._triggerCount_(
+      CosTriggerService.HANDLER_WEEKLY_PERFORMANCE
+    );
+    var timingPruneN = CosHealthCheckService._triggerCount_(
+      CosTriggerService.HANDLER_TIMING_ACTIVITY_PRUNE
+    );
 
     CosHealthCheckService._expectTrigger_(
       items,
@@ -377,6 +446,20 @@ var CosHealthCheckService = {
       telegramPollN,
       CosTriggerService.HANDLER_TELEGRAM_POLL
     );
+    CosHealthCheckService._expectTrigger_(
+      items,
+      'trigger_weekly_performance',
+      settings.weeklyPerformanceReportEnabled,
+      weeklyPerfN,
+      CosTriggerService.HANDLER_WEEKLY_PERFORMANCE
+    );
+    CosHealthCheckService._expectTrigger_(
+      items,
+      'trigger_timing_activity_prune',
+      settings.timingActivityPruneTriggerEnabled,
+      timingPruneN,
+      CosTriggerService.HANDLER_TIMING_ACTIVITY_PRUNE
+    );
 
     if (
       gmailN > 1 ||
@@ -384,7 +467,9 @@ var CosHealthCheckService = {
       digestN > 1 ||
       closureN > 1 ||
       calSyncN > 1 ||
-      telegramPollN > 1
+      telegramPollN > 1 ||
+      weeklyPerfN > 1 ||
+      timingPruneN > 1
     ) {
       items.push({
         id: 'trigger_duplicates',
@@ -398,6 +483,8 @@ var CosHealthCheckService = {
           closureMaintenance: closureN,
           calendarJeevesSync: calSyncN,
           telegramPoll: telegramPollN,
+          weeklyPerformance: weeklyPerfN,
+          timingActivityPrune: timingPruneN,
         },
       });
     }

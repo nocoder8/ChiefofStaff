@@ -8,6 +8,37 @@ function CosSettingsRepository() {
 }
 
 /**
+ * Resolves the signed-in user email when OAuth allows it.
+ * With explicit oauthScopes, https://www.googleapis.com/auth/userinfo.email must be in appsscript.json
+ * and the user must re-authorize; until then this returns '' so Install can still finish.
+ * @returns {string}
+ * @private
+ */
+CosSettingsRepository.tryGetActiveUserEmail_ = function () {
+  try {
+    var a = Session.getActiveUser().getEmail();
+    if (a && String(a).trim()) {
+      return String(a).trim();
+    }
+  } catch (err) {
+    CosLogger.info('Active user email unavailable (Session); re-authorize or set USER_EMAIL.', {
+      error: String(err.message || err),
+    });
+  }
+  try {
+    var b = SpreadsheetApp.getActiveUser().getEmail();
+    if (b && String(b).trim()) {
+      return String(b).trim();
+    }
+  } catch (err2) {
+    CosLogger.info('Active user email unavailable (SpreadsheetApp); re-authorize or set USER_EMAIL.', {
+      error: String(err2.message || err2),
+    });
+  }
+  return '';
+};
+
+/**
  * @returns {CosSettings}
  */
 CosSettingsRepository.prototype.getSettings = function () {
@@ -16,6 +47,11 @@ CosSettingsRepository.prototype.getSettings = function () {
 
   return {
     userEmail: CosSettingsRepository._readString(raw, keys.USER_EMAIL, ''),
+    userDisplayFirstName: CosSettingsRepository._readString(
+      raw,
+      keys.USER_DISPLAY_FIRST_NAME,
+      ''
+    ),
     primaryCalendarId: CosSettingsRepository._readString(
       raw,
       keys.PRIMARY_CALENDAR_ID,
@@ -165,6 +201,21 @@ CosSettingsRepository.prototype.getSettings = function () {
       keys.TELEGRAM_CONVERSATIONAL_MODE_ENABLED,
       false
     ),
+    weeklyPerformanceReportEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.WEEKLY_PERFORMANCE_REPORT_ENABLED,
+      false
+    ),
+    timingActivityPruneTriggerEnabled: CosSettingsRepository._readBoolean(
+      raw,
+      keys.TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED,
+      false
+    ),
+    timingActivityRetentionDays: CosSettingsRepository._readPositiveInt_(
+      raw,
+      keys.TIMING_ACTIVITY_RETENTION_DAYS,
+      CosConstants.DEFAULT_TIMING_ACTIVITY_RETENTION_DAYS
+    ),
   };
 };
 
@@ -180,7 +231,7 @@ CosSettingsRepository.prototype.seedDefaultsIfMissing = function (
   var existing = this._props.getProperties();
   var patch = {};
 
-  var email = Session.getActiveUser().getEmail();
+  var email = CosSettingsRepository.tryGetActiveUserEmail_();
   if (!existing[keys.USER_EMAIL] && email) {
     patch[keys.USER_EMAIL] = email;
   }
@@ -272,6 +323,17 @@ CosSettingsRepository.prototype.seedDefaultsIfMissing = function (
   }
   if (existing[keys.TELEGRAM_CONVERSATIONAL_MODE_ENABLED] === undefined) {
     patch[keys.TELEGRAM_CONVERSATIONAL_MODE_ENABLED] = 'false';
+  }
+  if (existing[keys.WEEKLY_PERFORMANCE_REPORT_ENABLED] === undefined) {
+    patch[keys.WEEKLY_PERFORMANCE_REPORT_ENABLED] = 'true';
+  }
+  if (existing[keys.TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED] === undefined) {
+    patch[keys.TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED] = 'false';
+  }
+  if (existing[keys.TIMING_ACTIVITY_RETENTION_DAYS] === undefined) {
+    patch[keys.TIMING_ACTIVITY_RETENTION_DAYS] = String(
+      CosConstants.DEFAULT_TIMING_ACTIVITY_RETENTION_DAYS
+    );
   }
 
   if (Object.keys(patch).length) {

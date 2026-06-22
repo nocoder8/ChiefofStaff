@@ -8,6 +8,69 @@ var CosClosureLinkService = {
     return url.length > 8 && sec.length > 8;
   },
 
+  /**
+   * One-tap “mark follow-up done” from the daily digest (signed GET).
+   * @param {string} taskId
+   * @param {CosSettings} settings
+   * @returns {string}
+   */
+  /**
+   * Uses dfu=1 (not action=digest_done) so email scanners less often strip the mode flag;
+   * same HMAC payload as CLOSURE_SIGN_ACTION_DIGEST_DONE.
+   */
+  /**
+   * Opens Gmail thread after one hop through the web app so the #fragment survives
+   * Gmail’s link wrapper (direct mail.google.com/#… links often do nothing in the Gmail client).
+   * Hop target uses #all/ so labeled/archived threads resolve (not only #inbox/).
+   * @param {string} threadId Gmail thread id (sourceRef)
+   * @param {CosSettings} settings
+   * @returns {string}
+   */
+  buildGmailThreadOpenUrl: function (threadId, settings) {
+    if (!CosClosureLinkService.isConfigured(settings)) {
+      return '';
+    }
+    var id = String(threadId || '').trim();
+    if (!id || !/^[a-fA-F0-9]+$/i.test(id) || id.length < 8) {
+      return '';
+    }
+    var base = String(settings.closureWebAppUrl || '').trim().replace(/\?+$/, '');
+    if (base.indexOf('/exec') < 0 && base.indexOf('/dev') < 0) {
+      base = base.replace(/\/+$/, '') + '/exec';
+    }
+    var q = 'gmailThread=' + encodeURIComponent(id);
+    return base.indexOf('?') >= 0 ? base + '&' + q : base + '?' + q;
+  },
+
+  buildDigestFollowUpDoneUrl: function (taskId, settings) {
+    if (!CosClosureLinkService.isConfigured(settings)) {
+      return '';
+    }
+    var id = String(taskId || '').trim();
+    if (!id) {
+      return '';
+    }
+    var base = String(settings.closureWebAppUrl || '').trim().replace(/\?+$/, '');
+    if (base.indexOf('/exec') < 0 && base.indexOf('/dev') < 0) {
+      base = base.replace(/\/+$/, '') + '/exec';
+    }
+    var exp = Math.floor(Date.now() / 1000) + CosConstants.CLOSURE_LINK_TTL_SECONDS;
+    var sig = CosClosureLinkService.signPayload(
+      id,
+      CosConstants.CLOSURE_SIGN_ACTION_DIGEST_DONE,
+      exp,
+      settings
+    );
+    var q =
+      'dfu=1&taskId=' +
+      encodeURIComponent(id) +
+      '&exp=' +
+      exp +
+      '&sig=' +
+      encodeURIComponent(sig);
+    return base.indexOf('?') >= 0 ? base + '&' + q : base + '?' + q;
+  },
+
   buildActionUrl: function (taskId, action, settings) {
     if (!CosClosureLinkService.isConfigured(settings)) {
       return '';

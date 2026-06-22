@@ -16,6 +16,8 @@
  * @property {string} sourceRef
  * @property {string} scheduledStart
  * @property {string} scheduledEnd
+ * @property {string} originalScheduledStart Latest abandoned Jeeves window (sheet TZ display / ISO)
+ * @property {string} originalScheduledEnd
  * @property {string} calendarEventId
  * @property {string} notes
  * @property {string} createdAt
@@ -26,6 +28,13 @@
  * @property {string} missCount
  * @property {string} lastOutcome Done | Rescheduled | Lowered | Dropped | ''
  * @property {string} lastNudgeAt
+ * @property {string} followUpContactEmail Resolved contact for Telegram follow-ups (digest mailto).
+ * @property {string} followUpContactName Display name when known from directory.
+ * @property {string} rescheduleCount Times moved/rescheduled (closure + calendar reschedule).
+ * @property {string} firstScheduledAt First calendar booking (ISO or sheet display).
+ * @property {string} completedAt When marked Done (analytics).
+ * @property {string} finalStatus Done | Dropped | ''
+ * @property {string} closureType Done | Reschedule | Lower | Drop | ''
  * @property {number} rowNumber 1-based sheet row when loaded from the sheet
  */
 
@@ -40,6 +49,8 @@
  * @property {string} [source]
  * @property {string} [sourceRef]
  * @property {string} [notes]
+ * @property {string} [followUpContactEmail]
+ * @property {string} [followUpContactName]
  */
 
 /**
@@ -54,6 +65,8 @@
  * @property {string} [sourceRef]
  * @property {string} [scheduledStart]
  * @property {string} [scheduledEnd]
+ * @property {string} [originalScheduledStart]
+ * @property {string} [originalScheduledEnd]
  * @property {string} [calendarEventId]
  * @property {string} [notes]
  * @property {string} [closureStatus]
@@ -62,6 +75,13 @@
  * @property {number|string} [missCount]
  * @property {string} [lastOutcome]
  * @property {string|Date} [lastNudgeAt]
+ * @property {string} [followUpContactEmail]
+ * @property {string} [followUpContactName]
+ * @property {number|string} [rescheduleCount]
+ * @property {string|Date} [firstScheduledAt]
+ * @property {string|Date} [completedAt]
+ * @property {string} [finalStatus]
+ * @property {string} [closureType]
  */
 
 /**
@@ -86,6 +106,7 @@
  * Parsed script settings (derived from Script Properties + defaults).
  * @typedef {Object} CosSettings
  * @property {string} userEmail
+ * @property {string} userDisplayFirstName optional; used for 1:1 calendar title “you” side when set
  * @property {string} primaryCalendarId
  * @property {string} timezone
  * @property {string} workHoursJson
@@ -119,6 +140,9 @@
  * @property {boolean} telegramUsePolling  When true, use getUpdates timer instead of webhook POST.
  * @property {boolean} telegramParseAiEnabled  LLM fallback for Telegram task capture (uses digest AI key).
  * @property {boolean} telegramConversationalModeEnabled  When true, LLM-first + butler-like replies + chat.
+ * @property {boolean} weeklyPerformanceReportEnabled  Saturday 9:00 sheet TZ weekly report (property missing ⇒ false; Install seeds true).
+ * @property {boolean} timingActivityPruneTriggerEnabled  Weekly Sun ~05:00 sheet TZ prune for activity + import log (default false).
+ * @property {number} timingActivityRetentionDays  Rolling calendar days of activity rows to keep (default 45).
  */
 
 /**

@@ -3,7 +3,8 @@
  * Handlers live in Main.gs: cos_triggerProcessGmail_, cos_triggerSchedulePending_,
  * cos_triggerDailyDigest_, cos_triggerClosureMaintenance_ (closure cadence in Constants),
  * cos_triggerCalendarJeevesSync_,
- * cos_triggerTelegramPoll_.
+ * cos_triggerTelegramPoll_,
+ * cos_triggerWeeklyPerformanceReport_, cos_triggerTimingActivityPrune_ (weekly rolling timing prune).
  */
 var CosTriggerService = {
   HANDLER_GMAIL: 'cos_triggerProcessGmail_',
@@ -12,6 +13,8 @@ var CosTriggerService = {
   HANDLER_CLOSURE_MAINTENANCE: 'cos_triggerClosureMaintenance_',
   HANDLER_CALENDAR_JEEVES_SYNC: 'cos_triggerCalendarJeevesSync_',
   HANDLER_TELEGRAM_POLL: 'cos_triggerTelegramPoll_',
+  HANDLER_WEEKLY_PERFORMANCE: 'cos_triggerWeeklyPerformanceReport_',
+  HANDLER_TIMING_ACTIVITY_PRUNE: 'cos_triggerTimingActivityPrune_',
 
   /**
    * Removes Chief-of-Staff triggers for known handlers, then recreates from settings.
@@ -103,6 +106,40 @@ var CosTriggerService = {
         );
       }
 
+      if (settings.weeklyPerformanceReportEnabled) {
+        var tzPerf =
+          String(settings.timezone || '').trim() || spreadsheetTimeZone;
+        ScriptApp.newTrigger(CosTriggerService.HANDLER_WEEKLY_PERFORMANCE)
+          .timeBased()
+          .onWeekDay(ScriptApp.WeekDay.SATURDAY)
+          .atHour(9)
+          .nearMinute(0)
+          .inTimezone(tzPerf)
+          .create();
+        installed.push(
+          'Weekly performance report Sat 09:00 ' + tzPerf
+        );
+      }
+
+      if (settings.timingActivityPruneTriggerEnabled) {
+        var tzPrune =
+          String(settings.timezone || '').trim() || spreadsheetTimeZone;
+        ScriptApp.newTrigger(CosTriggerService.HANDLER_TIMING_ACTIVITY_PRUNE)
+          .timeBased()
+          .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+          .atHour(5)
+          .nearMinute(0)
+          .inTimezone(tzPrune)
+          .create();
+        installed.push(
+          'Timing activity prune Sun ~05:00 ' +
+            tzPrune +
+            ' (rolling ' +
+            settings.timingActivityRetentionDays +
+            'd)'
+        );
+      }
+
       CosLogger.info('Triggers synced', { installed: installed });
       return { ok: true, installed: installed };
     } catch (e) {
@@ -140,6 +177,8 @@ var CosTriggerService = {
     handlers[CosTriggerService.HANDLER_CLOSURE_MAINTENANCE] = true;
     handlers[CosTriggerService.HANDLER_CALENDAR_JEEVES_SYNC] = true;
     handlers[CosTriggerService.HANDLER_TELEGRAM_POLL] = true;
+    handlers[CosTriggerService.HANDLER_WEEKLY_PERFORMANCE] = true;
+    handlers[CosTriggerService.HANDLER_TIMING_ACTIVITY_PRUNE] = true;
     var all = ScriptApp.getProjectTriggers();
     var i;
     for (i = 0; i < all.length; i++) {

@@ -164,6 +164,30 @@ CosTaskRepository._isValidLastOutcomeValue_ = function (s) {
 };
 
 /**
+ * @param {*} s
+ * @returns {boolean}
+ */
+CosTaskRepository._isValidFinalStatusValue_ = function (s) {
+  var t = String(s === undefined || s === null ? '' : s).trim();
+  if (!t) {
+    return true;
+  }
+  return CosConstants.TASK_ANALYTICS_FINAL_STATUS_LIST.indexOf(t) >= 0;
+};
+
+/**
+ * @param {*} s
+ * @returns {boolean}
+ */
+CosTaskRepository._isValidClosureTypeValue_ = function (s) {
+  var t = String(s === undefined || s === null ? '' : s).trim();
+  if (!t) {
+    return true;
+  }
+  return CosConstants.TASK_ANALYTICS_CLOSURE_TYPE_LIST.indexOf(t) >= 0;
+};
+
+/**
  * @param {*} cell
  * @returns {string}
  */
@@ -184,6 +208,34 @@ CosTaskRepository._missCountFromCell_ = function (cell) {
  * @returns {number} non-negative int for sheet cell
  */
 CosTaskRepository._missCountToCell_ = function (raw) {
+  var n = parseInt(String(raw === undefined || raw === null ? '0' : raw).trim(), 10);
+  if (isNaN(n) || n < 0) {
+    return 0;
+  }
+  return n;
+};
+
+/**
+ * @param {*} cell
+ * @returns {string}
+ */
+CosTaskRepository._rescheduleCountFromCell_ = function (cell) {
+  if (cell === '' || cell === null || cell === undefined) {
+    return '0';
+  }
+  if (typeof cell === 'number' && !isNaN(cell)) {
+    var rn = Math.round(cell);
+    return String(rn < 0 ? 0 : rn);
+  }
+  var n = parseInt(String(cell), 10);
+  return isNaN(n) || n < 0 ? '0' : String(n);
+};
+
+/**
+ * @param {*} raw
+ * @returns {number}
+ */
+CosTaskRepository._rescheduleCountToCell_ = function (raw) {
   var n = parseInt(String(raw === undefined || raw === null ? '0' : raw).trim(), 10);
   if (isNaN(n) || n < 0) {
     return 0;
@@ -309,16 +361,25 @@ CosTaskRepository.prototype._rowValuesToTask_ = function (values, rowNumber) {
     sourceRef: CosTaskRepository._formatCellDisplay_(v[7]),
     scheduledStart: CosTaskRepository._formatCellDisplay_(v[8]),
     scheduledEnd: CosTaskRepository._formatCellDisplay_(v[9]),
-    calendarEventId: CosTaskRepository._formatCellDisplay_(v[10]),
-    notes: CosTaskRepository._formatCellDisplay_(v[11]),
-    createdAt: CosTaskRepository._formatCellDisplay_(v[12]),
-    updatedAt: CosTaskRepository._formatCellDisplay_(v[13]),
-    closureStatus: CosTaskRepository._formatCellDisplay_(v[14]),
-    closureRequestedAt: CosTaskRepository._formatCellDisplay_(v[15]),
-    completionTimestamp: CosTaskRepository._formatCellDisplay_(v[16]),
-    missCount: CosTaskRepository._missCountFromCell_(v[17]),
-    lastOutcome: CosTaskRepository._formatCellDisplay_(v[18]),
-    lastNudgeAt: CosTaskRepository._formatCellDisplay_(v[19]),
+    originalScheduledStart: CosTaskRepository._formatCellDisplay_(v[10]),
+    originalScheduledEnd: CosTaskRepository._formatCellDisplay_(v[11]),
+    calendarEventId: CosTaskRepository._formatCellDisplay_(v[12]),
+    notes: CosTaskRepository._formatCellDisplay_(v[13]),
+    createdAt: CosTaskRepository._formatCellDisplay_(v[14]),
+    updatedAt: CosTaskRepository._formatCellDisplay_(v[15]),
+    closureStatus: CosTaskRepository._formatCellDisplay_(v[16]),
+    closureRequestedAt: CosTaskRepository._formatCellDisplay_(v[17]),
+    completionTimestamp: CosTaskRepository._formatCellDisplay_(v[18]),
+    missCount: CosTaskRepository._missCountFromCell_(v[19]),
+    lastOutcome: CosTaskRepository._formatCellDisplay_(v[20]),
+    lastNudgeAt: CosTaskRepository._formatCellDisplay_(v[21]),
+    followUpContactEmail: CosTaskRepository._formatCellDisplay_(v[22]),
+    followUpContactName: CosTaskRepository._formatCellDisplay_(v[23]),
+    rescheduleCount: CosTaskRepository._rescheduleCountFromCell_(v[24]),
+    firstScheduledAt: CosTaskRepository._formatCellDisplay_(v[25]),
+    completedAt: CosTaskRepository._formatCellDisplay_(v[26]),
+    finalStatus: CosTaskRepository._formatCellDisplay_(v[27]),
+    closureType: CosTaskRepository._formatCellDisplay_(v[28]),
     rowNumber: rowNumber,
   };
 };
@@ -328,19 +389,27 @@ CosTaskRepository.prototype._rowValuesToTask_ = function (values, rowNumber) {
  * @returns {Array}
  */
 CosTaskRepository.prototype._taskToRowValues_ = function (task) {
+  var pri = String(task.priority || '').trim();
+  var durNum = CosTaskRepository._parseDurationNumber_(task.durationMin);
+  var durCell =
+    pri === CosConstants.TASK_PRIORITY.FOLLOW_UP
+      ? ''
+      : durNum !== null
+        ? durNum
+        : CosConstants.DEFAULT_TASK_DURATION_MINUTES;
   return [
     task.taskId,
     task.task,
     task.priority,
-    CosTaskRepository._parseDurationNumber_(task.durationMin) !== null
-      ? CosTaskRepository._parseDurationNumber_(task.durationMin)
-      : CosConstants.DEFAULT_TASK_DURATION_MINUTES,
+    durCell,
     task.deadline === '' ? '' : CosTaskRepository._parseToSheetDate_(task.deadline),
     task.status,
     task.source,
     task.sourceRef,
     CosTaskRepository._parseToSheetDate_(task.scheduledStart),
     CosTaskRepository._parseToSheetDate_(task.scheduledEnd),
+    CosTaskRepository._parseToSheetDate_(task.originalScheduledStart),
+    CosTaskRepository._parseToSheetDate_(task.originalScheduledEnd),
     task.calendarEventId,
     task.notes,
     CosTaskRepository._parseToSheetDate_(task.createdAt),
@@ -355,6 +424,21 @@ CosTaskRepository.prototype._taskToRowValues_ = function (task) {
       ? ''
       : String(task.lastOutcome).trim(),
     CosTaskRepository._parseToSheetDate_(task.lastNudgeAt),
+    task.followUpContactEmail === undefined || task.followUpContactEmail === null
+      ? ''
+      : String(task.followUpContactEmail).trim().toLowerCase(),
+    task.followUpContactName === undefined || task.followUpContactName === null
+      ? ''
+      : String(task.followUpContactName).trim(),
+    CosTaskRepository._rescheduleCountToCell_(task.rescheduleCount),
+    CosTaskRepository._parseToSheetDate_(task.firstScheduledAt),
+    CosTaskRepository._parseToSheetDate_(task.completedAt),
+    task.finalStatus === undefined || task.finalStatus === null
+      ? ''
+      : String(task.finalStatus).trim(),
+    task.closureType === undefined || task.closureType === null
+      ? ''
+      : String(task.closureType).trim(),
   ];
 };
 
@@ -397,6 +481,10 @@ CosTaskRepository.prototype._requireSheet_ = function () {
 CosTaskRepository.prototype.ensureSchema = function () {
   var sheet = this._getOrCreateTasksSheet_();
   this._migrateTaskSheetToV2IfNeeded_(sheet);
+  this._migrateTaskSheetToFollowUpContactColumns_(sheet);
+  this._migrateTaskSheetToAnalyticsColumns_(sheet);
+  this._migrateTaskSheetToOriginalScheduleColumns_(sheet);
+  this._migrateExpandTrailingColumnsIfNeeded_(sheet);
   this._ensureCanonicalHeaders_(sheet);
   this._applyValidations_(sheet);
   this._freezeHeaderRow_(sheet);
@@ -438,6 +526,138 @@ CosTaskRepository.prototype._migrateTaskSheetToV2IfNeeded_ = function (sheet) {
 };
 
 /**
+ * Expands 20-column Tasks sheet (pre follow-up contact fields) to current TASK_HEADERS length.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @private
+ */
+CosTaskRepository.prototype._migrateTaskSheetToFollowUpContactColumns_ = function (
+  sheet
+) {
+  var expected = CosConstants.TASK_HEADERS;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol >= expected.length) {
+    return;
+  }
+  if (lastCol !== 20) {
+    return;
+  }
+  var header = sheet
+    .getRange(1, 1, 1, 20)
+    .getValues()[0]
+    .map(function (c) {
+      return String(c).trim();
+    });
+  var want20 = expected.slice(0, 20);
+  var i;
+  for (i = 0; i < 20; i++) {
+    if (header[i] !== want20[i]) {
+      return;
+    }
+  }
+  sheet.getRange(1, 1, 1, expected.length).setValues([expected.slice()]);
+  CosLogger.info('Tasks sheet expanded with follow-up contact columns', {
+    fromCols: 20,
+    toCols: expected.length,
+  });
+};
+
+/**
+ * Expands 22-column Tasks sheet (pre analytics) to full TASK_HEADERS length.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @private
+ */
+CosTaskRepository.prototype._migrateTaskSheetToAnalyticsColumns_ = function (
+  sheet
+) {
+  var expected = CosConstants.TASK_HEADERS;
+  var nPre = CosConstants.TASK_HEADERS_PRE_ANALYTICS_COLUMN_COUNT;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol >= expected.length) {
+    return;
+  }
+  if (lastCol !== nPre) {
+    return;
+  }
+  var header = sheet
+    .getRange(1, 1, 1, nPre)
+    .getValues()[0]
+    .map(function (c) {
+      return String(c).trim();
+    });
+  var wantPre = expected.slice(0, nPre);
+  var i;
+  for (i = 0; i < nPre; i++) {
+    if (header[i] !== wantPre[i]) {
+      return;
+    }
+  }
+  sheet.getRange(1, 1, 1, expected.length).setValues([expected.slice()]);
+  CosLogger.info('Tasks sheet expanded with performance analytics columns', {
+    fromCols: nPre,
+    toCols: expected.length,
+  });
+};
+
+/**
+ * Inserts Original Scheduled Start/End after Scheduled End (27-col layout → current).
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @private
+ */
+CosTaskRepository.prototype._migrateTaskSheetToOriginalScheduleColumns_ = function (
+  sheet
+) {
+  var expected = CosConstants.TASK_HEADERS;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol >= expected.length) {
+    return;
+  }
+  if (lastCol !== 27) {
+    return;
+  }
+  var header = sheet
+    .getRange(1, 1, 1, 27)
+    .getValues()[0]
+    .map(function (c) {
+      return String(c).trim();
+    });
+  if (header[10] !== 'Calendar Event ID') {
+    return;
+  }
+  sheet.insertColumnsAfter(10, 2);
+  sheet.getRange(1, 1, 1, expected.length).setValues([expected.slice()]);
+  CosLogger.info('Tasks sheet migrated with Original Scheduled columns', {
+    fromCols: 27,
+    toCols: expected.length,
+  });
+};
+
+/**
+ * When the sheet is narrower than TASK_HEADERS (migrations did not apply), insert empty
+ * trailing columns so data in fixed positions is preserved and headers can be repaired.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @private
+ */
+CosTaskRepository.prototype._migrateExpandTrailingColumnsIfNeeded_ = function (
+  sheet
+) {
+  var expectedLen = CosConstants.TASK_HEADERS.length;
+  var lastCol = sheet.getLastColumn();
+  if (lastCol >= expectedLen) {
+    return;
+  }
+  if (lastCol <= 0) {
+    return;
+  }
+  var add = expectedLen - lastCol;
+  sheet.insertColumnsAfter(lastCol, add);
+  CosLogger.info('Tasks sheet: inserted trailing columns for canonical width', {
+    previousLastCol: lastCol,
+    inserted: add,
+    expectedLen: expectedLen,
+  });
+};
+
+/**
  * Validates header row and basic shape.
  * @returns {CosTasksSheetValidation}
  */
@@ -456,18 +676,6 @@ CosTaskRepository.prototype.validateSheet = function () {
   }
 
   var lastRow = sheet.getLastRow();
-  var lastCol = sheet.getLastColumn();
-  var expectedCols = CosConstants.TASK_HEADERS.length;
-
-  if (lastCol > 0 && lastCol !== expectedCols) {
-    messages.push(
-      'Column count is ' +
-        lastCol +
-        '; expected ' +
-        expectedCols +
-        ' for canonical schema.'
-    );
-  }
 
   if (lastRow > 0 && lastRow < CosConstants.TASKS_HEADER_ROW) {
     messages.push('Sheet has no header row.');
@@ -519,10 +727,11 @@ CosTaskRepository.prototype._ensureCanonicalHeaders_ = function (sheet) {
     return;
   }
 
+  // Header-only sheet (e.g. stray row 2): still safe to set canonical headers.
   if (lastRow > CosConstants.TASKS_HEADER_ROW) {
-    throw new Error(
-      'Tasks sheet headers do not match the canonical schema and data rows exist. ' +
-        'Fix headers manually or move data before running Install.'
+    CosLogger.warn(
+      'Tasks sheet row 1 did not match canonical headers; updating labels on row 1 only (data rows unchanged).',
+      { messages: check.messages }
     );
   }
 
@@ -553,24 +762,16 @@ CosTaskRepository.prototype._rowIsAllEmpty_ = function (sheet, row, numCols) {
  */
 CosTaskRepository.prototype._readHeaderRow_ = function (sheet) {
   var expected = CosConstants.TASK_HEADERS;
-  var lastCol = sheet.getLastColumn();
-  if (lastCol < expected.length) {
-    return {
-      ok: false,
-      messages: [
-        'Header row is missing or incomplete (expected ' +
-          expected.length +
-          ' columns).',
-      ],
-    };
+  var expectedLen = expected.length;
+  // Do not use getLastColumn() for width: trailing columns can be empty after insertColumnsAfter,
+  // so "last content column" stays short until row 1 is filled across the full width.
+  var row = sheet.getRange(1, 1, 1, expectedLen).getValues()[0];
+  var actual = [];
+  var j;
+  for (j = 0; j < expectedLen; j++) {
+    var cell = j < row.length ? row[j] : '';
+    actual.push(String(cell === null || cell === undefined ? '' : cell).trim());
   }
-
-  var actual = sheet
-    .getRange(1, 1, 1, expected.length)
-    .getValues()[0]
-    .map(function (cell) {
-      return String(cell).trim();
-    });
 
   for (var i = 0; i < expected.length; i++) {
     if (actual[i] !== expected[i]) {
@@ -638,6 +839,16 @@ CosTaskRepository.prototype._applyValidations_ = function (sheet) {
     .setAllowInvalid(true)
     .build();
 
+  var finalStatusRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CosConstants.TASK_ANALYTICS_FINAL_STATUS_LIST, true)
+    .setAllowInvalid(true)
+    .build();
+
+  var closureTypeRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CosConstants.TASK_ANALYTICS_CLOSURE_TYPE_LIST, true)
+    .setAllowInvalid(true)
+    .build();
+
   if (dataRegionNumRows > 0) {
     CosTaskRepository._sheetRangeOneColumn_(
       sheet,
@@ -669,6 +880,27 @@ CosTaskRepository.prototype._applyValidations_ = function (sheet) {
       dataRegionNumRows,
       outcomeCol
     ).setDataValidation(outcomeRule);
+
+    CosTaskRepository._sheetRangeOneColumn_(
+      sheet,
+      start,
+      dataRegionNumRows,
+      CosConstants.COL.FINAL_STATUS
+    ).setDataValidation(finalStatusRule);
+
+    CosTaskRepository._sheetRangeOneColumn_(
+      sheet,
+      start,
+      dataRegionNumRows,
+      CosConstants.COL.CLOSURE_TYPE
+    ).setDataValidation(closureTypeRule);
+
+    CosTaskRepository._sheetRangeOneColumn_(
+      sheet,
+      start,
+      dataRegionNumRows,
+      CosConstants.COL.SOURCE_REF
+    ).setNumberFormat('@');
   }
 
   this._applyDateTimeDisplayFormats_(sheet);
@@ -868,9 +1100,86 @@ CosTaskRepository.prototype.dropPendingOrScheduledTask = function (taskId) {
     lastOutcome: CosConstants.TASK_LAST_OUTCOME.DROPPED,
     scheduledStart: '',
     scheduledEnd: '',
+    originalScheduledStart: '',
+    originalScheduledEnd: '',
     calendarEventId: '',
     closureStatus: '',
     closureRequestedAt: '',
+    finalStatus: CosConstants.TASK_ANALYTICS_FINAL_STATUS.DROPPED,
+    closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.DROP,
+  });
+};
+
+/**
+ * User removed or cancelled the linked calendar event (API or CalendarApp). Marks task Dropped
+ * and clears schedule/closure fields. Works for Scheduled and Awaiting Closure.
+ * @param {string} taskId
+ * @returns {CosTask|null}
+ */
+CosTaskRepository.prototype.markDroppedBecauseLinkedCalendarEventRemoved = function (
+  taskId
+) {
+  var id = String(taskId || '').trim();
+  if (!id) {
+    return null;
+  }
+  var task = this.fetchByTaskId(id);
+  if (!task) {
+    return null;
+  }
+  var st = String(task.status || '').trim();
+  if (
+    st !== CosConstants.TASK_STATUS.SCHEDULED &&
+    st !== CosConstants.TASK_STATUS.AWAITING_CLOSURE
+  ) {
+    return null;
+  }
+  var cal = CosCalendarRepository.fromSettings(
+    new CosSettingsRepository().getSettings()
+  );
+  CosTaskClosureService._deleteCalendarIfLinked_(cal, task);
+  /** @type {Object<string, string>} */
+  var patch = {
+    status: CosConstants.TASK_STATUS.DROPPED,
+    lastOutcome: CosConstants.TASK_LAST_OUTCOME.DROPPED,
+    scheduledStart: '',
+    scheduledEnd: '',
+    originalScheduledStart: '',
+    originalScheduledEnd: '',
+    calendarEventId: '',
+    closureRequestedAt: '',
+    finalStatus: CosConstants.TASK_ANALYTICS_FINAL_STATUS.DROPPED,
+    closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.DROP,
+  };
+  if (st === CosConstants.TASK_STATUS.AWAITING_CLOSURE) {
+    patch.closureStatus = CosConstants.TASK_CLOSURE_STATUS.RESOLVED;
+  } else {
+    patch.closureStatus = '';
+  }
+  return this.updateTask(id, patch);
+};
+
+/**
+ * Removes the task row entirely (e.g. user deleted the Jeeves block in Google Calendar).
+ * @param {string} taskId
+ * @returns {boolean}
+ */
+CosTaskRepository.prototype.deleteTaskRowByTaskId = function (taskId) {
+  var self = this;
+  return this._withDocumentLock_(function () {
+    var id = String(taskId || '').trim();
+    if (!id) {
+      return false;
+    }
+    var sheet = self._requireSheet_();
+    var row = self._findRowIndexByTaskId_(sheet, id);
+    if (row < 0) {
+      return false;
+    }
+    sheet.deleteRow(row);
+    self._applyValidations_(sheet);
+    CosLogger.info('Task row deleted from sheet', { taskId: id, row: row });
+    return true;
   });
 };
 
@@ -888,15 +1197,18 @@ CosTaskRepository.prototype.createTask = function (input) {
     }
     var sheet = self._requireSheet_();
     var now = CosTaskRepository._nowIso_();
+    var pri = CosTaskRepository._isValidPriority_(input.priority)
+      ? String(input.priority).trim()
+      : CosConstants.TASK_PRIORITY.P2;
+    var durationStr =
+      pri === CosConstants.TASK_PRIORITY.FOLLOW_UP
+        ? ''
+        : String(CosTaskRepository._normalizeDurationInput_(input.durationMin));
     var task = {
       taskId: Utilities.getUuid(),
       task: String(input.task).trim(),
-      priority: CosTaskRepository._isValidPriority_(input.priority)
-        ? String(input.priority).trim()
-        : CosConstants.TASK_PRIORITY.P2,
-      durationMin: String(
-        CosTaskRepository._normalizeDurationInput_(input.durationMin)
-      ),
+      priority: pri,
+      durationMin: durationStr,
       deadline: CosTaskRepository._formatCellDisplay_(
         CosTaskRepository._deadlineForCell_(input.deadline)
       ),
@@ -910,6 +1222,8 @@ CosTaskRepository.prototype.createTask = function (input) {
       sourceRef: input.sourceRef ? String(input.sourceRef).trim() : '',
       scheduledStart: '',
       scheduledEnd: '',
+      originalScheduledStart: '',
+      originalScheduledEnd: '',
       calendarEventId: '',
       notes: input.notes ? String(input.notes).trim() : '',
       createdAt: now,
@@ -920,6 +1234,21 @@ CosTaskRepository.prototype.createTask = function (input) {
       missCount: '0',
       lastOutcome: '',
       lastNudgeAt: '',
+      followUpContactEmail:
+        input.followUpContactEmail !== undefined &&
+        input.followUpContactEmail !== null
+          ? String(input.followUpContactEmail).trim().toLowerCase()
+          : '',
+      followUpContactName:
+        input.followUpContactName !== undefined &&
+        input.followUpContactName !== null
+          ? String(input.followUpContactName).trim()
+          : '',
+      rescheduleCount: '0',
+      firstScheduledAt: '',
+      completedAt: '',
+      finalStatus: '',
+      closureType: '',
       rowNumber: 0,
     };
 
@@ -972,8 +1301,12 @@ CosTaskRepository.prototype.updateTask = function (taskId, patch) {
     }
     if (patch.durationMin !== undefined) {
       var dn = CosTaskRepository._parseDurationNumber_(patch.durationMin);
-      task.durationMin =
-        dn !== null ? String(dn) : String(CosConstants.DEFAULT_TASK_DURATION_MINUTES);
+      if (String(task.priority || '').trim() === CosConstants.TASK_PRIORITY.FOLLOW_UP) {
+        task.durationMin = '';
+      } else {
+        task.durationMin =
+          dn !== null ? String(dn) : String(CosConstants.DEFAULT_TASK_DURATION_MINUTES);
+      }
     }
     if (patch.deadline !== undefined) {
       task.deadline = CosTaskRepository._formatCellDisplay_(
@@ -998,6 +1331,16 @@ CosTaskRepository.prototype.updateTask = function (taskId, patch) {
     }
     if (patch.scheduledEnd !== undefined) {
       task.scheduledEnd = CosTaskRepository._patchString_(patch.scheduledEnd);
+    }
+    if (patch.originalScheduledStart !== undefined) {
+      task.originalScheduledStart = CosTaskRepository._patchString_(
+        patch.originalScheduledStart
+      );
+    }
+    if (patch.originalScheduledEnd !== undefined) {
+      task.originalScheduledEnd = CosTaskRepository._patchString_(
+        patch.originalScheduledEnd
+      );
     }
     if (patch.calendarEventId !== undefined) {
       task.calendarEventId = CosTaskRepository._patchString_(patch.calendarEventId);
@@ -1049,6 +1392,55 @@ CosTaskRepository.prototype.updateTask = function (taskId, patch) {
           lna === '' ? '' : CosTaskRepository._formatCellDisplay_(lna);
       }
     }
+    if (patch.followUpContactEmail !== undefined) {
+      task.followUpContactEmail =
+        patch.followUpContactEmail === '' || patch.followUpContactEmail === null
+          ? ''
+          : String(patch.followUpContactEmail).trim().toLowerCase();
+    }
+    if (patch.followUpContactName !== undefined) {
+      task.followUpContactName =
+        patch.followUpContactName === '' || patch.followUpContactName === null
+          ? ''
+          : String(patch.followUpContactName).trim();
+    }
+    if (patch.rescheduleCount !== undefined) {
+      task.rescheduleCount = String(
+        CosTaskRepository._rescheduleCountToCell_(patch.rescheduleCount)
+      );
+    }
+    if (patch.firstScheduledAt !== undefined) {
+      if (patch.firstScheduledAt === '' || patch.firstScheduledAt === null) {
+        task.firstScheduledAt = '';
+      } else {
+        var fsa = CosTaskRepository._parseToSheetDate_(patch.firstScheduledAt);
+        task.firstScheduledAt =
+          fsa === '' ? '' : CosTaskRepository._formatCellDisplay_(fsa);
+      }
+    }
+    if (patch.completedAt !== undefined) {
+      if (patch.completedAt === '' || patch.completedAt === null) {
+        task.completedAt = '';
+      } else {
+        var cat = CosTaskRepository._parseToSheetDate_(patch.completedAt);
+        task.completedAt =
+          cat === '' ? '' : CosTaskRepository._formatCellDisplay_(cat);
+      }
+    }
+    if (patch.finalStatus !== undefined) {
+      task.finalStatus = CosTaskRepository._isValidFinalStatusValue_(
+        patch.finalStatus
+      )
+        ? CosTaskRepository._patchString_(patch.finalStatus)
+        : task.finalStatus;
+    }
+    if (patch.closureType !== undefined) {
+      task.closureType = CosTaskRepository._isValidClosureTypeValue_(
+        patch.closureType
+      )
+        ? CosTaskRepository._patchString_(patch.closureType)
+        : task.closureType;
+    }
     if (
       task.status === CosConstants.TASK_STATUS.SCHEDULED &&
       String(task.scheduledStart || '').trim()
@@ -1059,6 +1451,9 @@ CosTaskRepository.prototype.updateTask = function (taskId, patch) {
       if (strippedNotes !== task.notes) {
         task.notes = strippedNotes;
       }
+    }
+    if (String(task.priority || '').trim() === CosConstants.TASK_PRIORITY.FOLLOW_UP) {
+      task.durationMin = '';
     }
     task.updatedAt = CosTaskRepository._nowIso_();
     self._writeTaskAtRow_(sheet, found, task);
@@ -1078,12 +1473,39 @@ CosTaskRepository.prototype.markScheduled = function (taskId, slot) {
     CosLogger.error('markScheduled: slot object required', { taskId: taskId });
     return null;
   }
-  return this.updateTask(taskId, {
+  var existing = this.fetchByTaskId(taskId);
+  var newSs = String(slot.scheduledStart || '').trim();
+  var newSe = String(slot.scheduledEnd || '').trim();
+  var patch = {
     status: CosConstants.TASK_STATUS.SCHEDULED,
     scheduledStart: slot.scheduledStart,
     scheduledEnd: slot.scheduledEnd,
     calendarEventId: slot.calendarEventId,
-  });
+  };
+  if (!existing) {
+    patch.originalScheduledStart = slot.scheduledStart;
+    patch.originalScheduledEnd = slot.scheduledEnd;
+  } else {
+    var exSs = String(existing.scheduledStart || '').trim();
+    var exSe = String(existing.scheduledEnd || '').trim();
+    if (exSs && exSe) {
+      if (exSs !== newSs || exSe !== newSe) {
+        patch.originalScheduledStart = existing.scheduledStart;
+        patch.originalScheduledEnd = existing.scheduledEnd;
+      }
+    } else {
+      patch.originalScheduledStart = slot.scheduledStart;
+      patch.originalScheduledEnd = slot.scheduledEnd;
+    }
+  }
+  if (
+    existing &&
+    !String(existing.firstScheduledAt || '').trim() &&
+    newSs
+  ) {
+    patch.firstScheduledAt = slot.scheduledStart;
+  }
+  return this.updateTask(taskId, patch);
 };
 
 /**
@@ -1091,8 +1513,13 @@ CosTaskRepository.prototype.markScheduled = function (taskId, slot) {
  * @returns {CosTask|null}
  */
 CosTaskRepository.prototype.markDone = function (taskId) {
+  var nowIso = CosTaskRepository._nowIso_();
   return this.updateTask(taskId, {
     status: CosConstants.TASK_STATUS.DONE,
+    completionTimestamp: nowIso,
+    completedAt: nowIso,
+    finalStatus: CosConstants.TASK_ANALYTICS_FINAL_STATUS.DONE,
+    closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.DONE,
   });
 };
 
@@ -1210,43 +1637,66 @@ CosTaskRepository.prototype._normalizeRowInPlace_ = function (row) {
     row[6] = CosConstants.TASK_SOURCE.MANUAL;
     changed = true;
   }
+  var priNorm = String(row[2] || '').trim();
   if (CosTaskRepository._parseDurationNumber_(row[3]) === null) {
-    row[3] = CosConstants.DEFAULT_TASK_DURATION_MINUTES;
-    changed = true;
+    if (priNorm === CosConstants.TASK_PRIORITY.FOLLOW_UP) {
+      row[3] = '';
+      changed = true;
+    } else {
+      row[3] = CosConstants.DEFAULT_TASK_DURATION_MINUTES;
+      changed = true;
+    }
   } else {
     row[3] = CosTaskRepository._parseDurationNumber_(row[3]);
+    if (priNorm === CosConstants.TASK_PRIORITY.FOLLOW_UP) {
+      row[3] = '';
+      changed = true;
+    }
   }
   var cr =
-    row[12] === null || row[12] === undefined ? '' : String(row[12]).trim();
+    row[14] === null || row[14] === undefined ? '' : String(row[14]).trim();
   if (!cr) {
-    row[12] = new Date();
+    row[14] = new Date();
     changed = true;
   }
   var up =
-    row[13] === null || row[13] === undefined ? '' : String(row[13]).trim();
+    row[15] === null || row[15] === undefined ? '' : String(row[15]).trim();
   if (changed) {
-    row[13] = new Date();
+    row[15] = new Date();
   } else if (!up) {
-    row[13] = new Date();
+    row[15] = new Date();
     changed = true;
   }
   if (
-    row[17] === '' ||
-    row[17] === null ||
-    row[17] === undefined ||
-    (typeof row[17] === 'string' && String(row[17]).trim() === '')
+    row[19] === '' ||
+    row[19] === null ||
+    row[19] === undefined ||
+    (typeof row[19] === 'string' && String(row[19]).trim() === '')
   ) {
-    row[17] = 0;
+    row[19] = 0;
     changed = true;
   }
   CosTaskRepository._coerceSheetDatetimeCell_(row, 4);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 8);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 9);
-  CosTaskRepository._coerceSheetDatetimeCell_(row, 12);
-  CosTaskRepository._coerceSheetDatetimeCell_(row, 13);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 10);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 11);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 14);
   CosTaskRepository._coerceSheetDatetimeCell_(row, 15);
-  CosTaskRepository._coerceSheetDatetimeCell_(row, 16);
-  CosTaskRepository._coerceSheetDatetimeCell_(row, 19);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 17);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 18);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 21);
+  if (
+    row[24] === '' ||
+    row[24] === null ||
+    row[24] === undefined ||
+    (typeof row[24] === 'string' && String(row[24]).trim() === '')
+  ) {
+    row[24] = 0;
+    changed = true;
+  }
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 25);
+  CosTaskRepository._coerceSheetDatetimeCell_(row, 26);
   return changed;
 };
 
@@ -1268,7 +1718,7 @@ CosTaskRepository.prototype._fixDuplicateTaskIdsInPlace_ = function (rows) {
     }
     if (seen[id]) {
       rows[i][0] = Utilities.getUuid();
-      rows[i][13] = new Date();
+      rows[i][15] = new Date();
       fixed++;
     } else {
       seen[id] = true;

@@ -335,9 +335,14 @@ var CosTaskClosureService = {
       status: CosConstants.TASK_STATUS.DONE,
       lastOutcome: CosConstants.TASK_LAST_OUTCOME.DONE,
       completionTimestamp: nowIso,
+      completedAt: nowIso,
+      finalStatus: CosConstants.TASK_ANALYTICS_FINAL_STATUS.DONE,
+      closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.DONE,
       closureStatus: CosConstants.TASK_CLOSURE_STATUS.RESOLVED,
       scheduledStart: '',
       scheduledEnd: '',
+      originalScheduledStart: '',
+      originalScheduledEnd: '',
       calendarEventId: '',
     });
     return updated
@@ -386,11 +391,19 @@ var CosTaskClosureService = {
       );
       notes = CosTaskSchedulerService.appendJeevesDeferTagToNotes_(notes, ymd);
     }
+    var rc = CosTaskClosureService._parseRescheduleCount_(task.rescheduleCount);
+    var hadSlot =
+      String(task.scheduledStart || '').trim() &&
+      String(task.scheduledEnd || '').trim();
     var updated = repo.updateTask(task.taskId, {
       status: CosConstants.TASK_STATUS.PENDING,
       lastOutcome: CosConstants.TASK_LAST_OUTCOME.RESCHEDULED,
+      closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.RESCHEDULE,
+      rescheduleCount: String(rc + 1),
       closureStatus: '',
       closureRequestedAt: '',
+      originalScheduledStart: hadSlot ? task.scheduledStart : '',
+      originalScheduledEnd: hadSlot ? task.scheduledEnd : '',
       scheduledStart: '',
       scheduledEnd: '',
       calendarEventId: '',
@@ -424,10 +437,13 @@ var CosTaskClosureService = {
       status: CosConstants.TASK_STATUS.PENDING,
       priority: newPri,
       lastOutcome: CosConstants.TASK_LAST_OUTCOME.LOWERED,
+      closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.LOWER,
       closureStatus: '',
       closureRequestedAt: '',
       scheduledStart: '',
       scheduledEnd: '',
+      originalScheduledStart: '',
+      originalScheduledEnd: '',
       calendarEventId: '',
     });
     return updated
@@ -456,9 +472,13 @@ var CosTaskClosureService = {
     var updated = repo.updateTask(task.taskId, {
       status: CosConstants.TASK_STATUS.DROPPED,
       lastOutcome: CosConstants.TASK_LAST_OUTCOME.DROPPED,
+      finalStatus: CosConstants.TASK_ANALYTICS_FINAL_STATUS.DROPPED,
+      closureType: CosConstants.TASK_ANALYTICS_CLOSURE_TYPE.DROP,
       closureStatus: CosConstants.TASK_CLOSURE_STATUS.RESOLVED,
       scheduledStart: '',
       scheduledEnd: '',
+      originalScheduledStart: '',
+      originalScheduledEnd: '',
       calendarEventId: '',
     });
     return updated
@@ -511,6 +531,16 @@ var CosTaskClosureService = {
    * @private
    */
   _parseMissCount_: function (raw) {
+    var n = parseInt(String(raw || '0').trim(), 10);
+    return isNaN(n) || n < 0 ? 0 : n;
+  },
+
+  /**
+   * @param {string} raw
+   * @returns {number}
+   * @private
+   */
+  _parseRescheduleCount_: function (raw) {
     var n = parseInt(String(raw || '0').trim(), 10);
     return isNaN(n) || n < 0 ? 0 : n;
   },

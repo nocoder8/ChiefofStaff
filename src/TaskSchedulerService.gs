@@ -778,6 +778,8 @@ var CosTaskSchedulerService = {
       calendarEventId: '',
       scheduledStart: '',
       scheduledEnd: '',
+      originalScheduledStart: '',
+      originalScheduledEnd: '',
     });
     return {
       handled: false,
@@ -1163,13 +1165,17 @@ var CosTaskSchedulerService = {
     var cal = CosCalendarRepository.fromSettings(settings);
     if (st === CosConstants.TASK_STATUS.SCHEDULED) {
       CosTaskClosureService._deleteCalendarIfLinked_(cal, task);
+      var rcMove = CosTaskClosureService._parseRescheduleCount_(task.rescheduleCount);
       var up = repo.updateTask(id, {
         status: CosConstants.TASK_STATUS.PENDING,
         scheduledStart: '',
         scheduledEnd: '',
+        originalScheduledStart: '',
+        originalScheduledEnd: '',
         calendarEventId: '',
         closureStatus: '',
         closureRequestedAt: '',
+        rescheduleCount: String(rcMove + 1),
       });
       if (!up) {
         return { ok: false, code: 'update_failed', message: 'Could not clear schedule.' };

@@ -226,9 +226,11 @@ var CosTelegramTaskCaptureParser = {
     }
     var pri = pr || CosConstants.TASK_PRIORITY.P2;
     var dm =
-      dur !== null && dur !== undefined
-        ? String(dur)
-        : String(CosConstants.DEFAULT_TASK_DURATION_MINUTES);
+      pri === CosConstants.TASK_PRIORITY.FOLLOW_UP
+        ? ''
+        : dur !== null && dur !== undefined
+          ? String(dur)
+          : String(CosConstants.DEFAULT_TASK_DURATION_MINUTES);
     return {
       ok: true,
       task: title.substring(0, CosTelegramTaskCaptureParser.MAX_TITLE_LEN),
@@ -236,6 +238,29 @@ var CosTelegramTaskCaptureParser = {
       durationMin: dm,
       notes: '',
     };
+  },
+
+  /**
+   * Person named after “follow up with” / “followup with” in the task title (Workspace directory lookup).
+   * @param {string} title
+   * @returns {string}
+   * @private
+   */
+  _followUpContactNameFromTitle_: function (title) {
+    var t = String(title || '').replace(/\s+/g, ' ').trim();
+    var m = /\bfollow\s*up\s+with\s+(.+)$/i.exec(t);
+    if (!m) {
+      return '';
+    }
+    var rest = String(m[1] || '').trim();
+    var stop = /\s+(?:for|about|regarding)\b/i.exec(rest);
+    var chunk = stop ? rest.substring(0, stop.index).trim() : rest;
+    var words = chunk.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      return '';
+    }
+    var maxW = Math.min(words.length, 4);
+    return words.slice(0, maxW).join(' ');
   },
 
   /**
@@ -444,7 +469,7 @@ var CosTelegramTaskCaptureParser = {
       },
       {
         in: 'Follow up with finance tomorrow',
-        want: { priority: 'Follow-up', durationMin: '30', sub: 'finance' },
+        want: { priority: 'Follow-up', durationMin: '', sub: 'finance' },
       },
       {
         in: 'Remind me to prepare candidate notes for 20 mins',
@@ -458,6 +483,16 @@ var CosTelegramTaskCaptureParser = {
     var failed = 0;
     var failures = [];
     var i;
+    var fuName = CosTelegramTaskCaptureParser._followUpContactNameFromTitle_(
+      'Followup with Akhila for AIR SQL query'
+    );
+    if (fuName === 'Akhila') {
+      passed++;
+    } else {
+      failed++;
+      failures.push('follow-up name from title: got ' + JSON.stringify(fuName));
+    }
+
     var bs = CosTelegramTaskCaptureParser.parseBusinessDaySplit(
       'I need to dedicate 1 hour per day for the next 5 business days to build a deck for the CEO'
     );

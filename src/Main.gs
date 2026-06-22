@@ -21,8 +21,8 @@ function onOpen(e) {
 
 /**
  * One-shot OAuth: run this from the script editor (toolbar → function dropdown → Run ▶).
- * Resolves the bound Tasks sheet, then touches Sheets, Calendar, Gmail, and UrlFetch so
- * Google prompts for every scope in appsscript.json. Use this if trigger functions do not
+ * Resolves the bound Tasks sheet, then touches Sheets, Calendar, Gmail, UrlFetch, and
+ * ScriptApp (triggers) so Google prompts for every scope in appsscript.json. Use this if trigger functions do not
  * appear in the list or fail before authorization.
  *
  * Prerequisite: open Apps Script via the bound spreadsheet (Extensions → Apps Script), or
@@ -48,6 +48,7 @@ function authorizeChiefOfStaffPermissions() {
     muteHttpExceptions: true,
     followRedirects: true,
   });
+  ScriptApp.getProjectTriggers();
   Logger.log('authorizeChiefOfStaffPermissions: OK');
 }
 
@@ -71,7 +72,7 @@ function menuInstallChiefOfStaff() {
         ' Triggers: ' +
         (tr.installed.length
           ? tr.installed.join(' · ')
-          : 'none (enable EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, CALENDAR_SYNC_TRIGGER_ENABLED, CLOSURE_MAINTENANCE_TRIGGER_ENABLED, TELEGRAM_USE_POLLING, or schedule trigger).');
+          : 'none (enable EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, CALENDAR_SYNC_TRIGGER_ENABLED, CLOSURE_MAINTENANCE_TRIGGER_ENABLED, TELEGRAM_USE_POLLING, WEEKLY_PERFORMANCE_REPORT_ENABLED, TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED, or schedule trigger).');
     } else {
       msg += ' Triggers failed — ' + (tr.message || 'unknown') + ' (use Sync time triggers).';
     }
@@ -226,7 +227,11 @@ function menuProcessGmailInbox() {
         ? 'No threads to ingest (need [Jeeves]/task or [Jeeves]/follow-up without [Jeeves]/ok).'
         : 'Gmail: +' +
           r.created +
-          ' task(s), skipped ' +
+          ' new' +
+          ((r.upgraded || 0) > 0
+            ? ', ' + String(r.upgraded || 0) + ' → Follow-up'
+            : '') +
+          ', skipped ' +
           r.skipped +
           ', failed ' +
           r.failed +
@@ -259,7 +264,7 @@ function menuSyncTimeTriggers() {
     var msg = r.ok
       ? r.installed.length
         ? 'Triggers: ' + r.installed.join(' · ')
-        : 'No triggers (see EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, SCHEDULE_PENDING_TRIGGER_ENABLED, CALENDAR_SYNC_TRIGGER_ENABLED, CLOSURE_MAINTENANCE_TRIGGER_ENABLED, TELEGRAM_USE_POLLING).'
+        : 'No triggers (see EMAIL_TASKS_ENABLED, DAILY_DIGEST_ENABLED, SCHEDULE_PENDING_TRIGGER_ENABLED, CALENDAR_SYNC_TRIGGER_ENABLED, CLOSURE_MAINTENANCE_TRIGGER_ENABLED, TELEGRAM_USE_POLLING, WEEKLY_PERFORMANCE_REPORT_ENABLED, TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED).'
       : 'Trigger sync failed: ' + (r.message || 'unknown');
     ss.toast(msg, CosConstants.PRODUCT_NAME, 14);
     CosLogger.info('menuSyncTimeTriggers', r);
@@ -327,6 +332,28 @@ function menuLogSettings() {
     CosConstants.PRODUCT_NAME,
     8
   );
+}
+
+/**
+ * Chief of Staff → Log all Script Property keys (count + names).
+ * Project Settings only lists the first 50 keys read-only; the store can hold more (see Apps Script quotas).
+ */
+function menuLogScriptPropertyKeys() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var keys = Object.keys(props).sort();
+  CosLogger.info('Script property inventory (names only; values not logged)', {
+    count: keys.length,
+    keys: keys,
+  });
+  if (ss) {
+    ss.toast(
+      keys.length +
+        ' keys — names in Executions log (editor UI shows max 50 read-only).',
+      CosConstants.PRODUCT_NAME,
+      10
+    );
+  }
 }
 
 /**
@@ -434,6 +461,11 @@ function menuSyncJeevesCalendarToSheet() {
         (r.revertedToScheduled
           ? ' (' + r.revertedToScheduled + ' back to Scheduled)'
           : '') +
+        ((r.rowsDropped || r.rowsRemoved || 0) > 0
+          ? ' · ' +
+            (r.rowsDropped || r.rowsRemoved) +
+            ' dropped (calendar event removed or cancelled)'
+          : '') +
         ' · ' +
         r.scanned +
         ' linked row(s) scanned.';
@@ -522,6 +554,41 @@ function cos_triggerDailyDigest_() {
 }
 
 /**
+ * Weekly (Saturday 09:00 sheet TZ): task performance metrics + score via email and Telegram.
+ * Script Property WEEKLY_PERFORMANCE_REPORT_ENABLED (Install seeds true when key missing).
+ */
+function cos_triggerWeeklyPerformanceReport_() {
+  try {
+    var r = CosTaskAnalyticsService.sendWeeklyReport();
+    CosLogger.info('cos_triggerWeeklyPerformanceReport_', r);
+  } catch (e) {
+    CosLogger.error('cos_triggerWeeklyPerformanceReport_', { error: String(e) });
+  }
+}
+
+/**
+ * Weekly (Sunday ~05:00 sheet TZ): drop RAW_TIMING_ACTIVITY + TIMING_ACTIVITY_IMPORT_LOG rows older than a rolling
+ * TIMING_ACTIVITY_RETENTION_DAYS calendar-day window when TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED is true.
+ */
+function cos_triggerTimingActivityPrune_() {
+  try {
+    var ss = CosBootstrap.getSpreadsheetForRun();
+    if (!ss) {
+      CosLogger.error('cos_triggerTimingActivityPrune_', { message: 'no spreadsheet' });
+      return;
+    }
+    var settings = new CosSettingsRepository().getSettings();
+    var r = CosTimingRetentionService.pruneActivitySheets(
+      ss,
+      settings.timingActivityRetentionDays
+    );
+    CosLogger.info('cos_triggerTimingActivityPrune_', r);
+  } catch (e) {
+    CosLogger.error('cos_triggerTimingActivityPrune_', { error: String(e) });
+  }
+}
+
+/**
  * Chief of Staff → Set digest AI API key (Script Properties; enables DIGEST_AI_ENABLED).
  * You paste the key here; use Project Settings → Script properties to edit provider/model without re-pasting.
  */
@@ -576,6 +643,235 @@ function menuDisableDigestAi() {
   );
   ss.toast('Digest AI summaries disabled (key not deleted).', CosConstants.PRODUCT_NAME, 8);
   CosLogger.info('Digest AI: DIGEST_AI_ENABLED set false');
+}
+
+/**
+ * Chief of Staff → Set Timing API key (Script Property TIMING_API_KEY).
+ * Create the key in Timing → Settings → Web API (https://web.timingapp.com/docs/).
+ */
+function menuSetTimingApiKey() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuSetTimingApiKey: no active spreadsheet');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt(
+    'Timing — API key',
+    'Paste your Timing Web API bearer token. It is stored only in this project’s Script Properties (TIMING_API_KEY).\n' +
+      'Optional: set TIMING_API_BASE_URL in Script properties if you use a non-default host.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  var key = response.getResponseText().toString().replace(/^\s+|\s+$/g, '');
+  if (!key) {
+    ss.toast('No key entered.', CosConstants.PRODUCT_NAME, 6);
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CosTimingConstants.PROP_KEYS.TIMING_API_KEY,
+    key
+  );
+  ss.toast(
+    'Timing API key saved. Use “Test Timing API connection” to verify.',
+    CosConstants.PRODUCT_NAME,
+    10
+  );
+  CosLogger.info('Timing: TIMING_API_KEY stored');
+}
+
+/**
+ * Chief of Staff → Test Timing API (today’s entries; 0 rows is OK if none logged).
+ */
+function menuTestTimingApiConnection() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuTestTimingApiConnection: no active spreadsheet');
+    return;
+  }
+  var p = CosTimingApiClient.ping();
+  CosLogger.info('menuTestTimingApiConnection', p);
+  if (!p.ok) {
+    ss.toast('Timing API: ' + (p.error || 'failed'), CosConstants.PRODUCT_NAME, 12);
+    return;
+  }
+  ss.toast(
+    'Timing API OK · sample rows: ' +
+      (p.sampleCount != null ? p.sampleCount : 0) +
+      ' · pages: ' +
+      (p.pageCount != null ? p.pageCount : 1),
+    CosConstants.PRODUCT_NAME,
+    10
+  );
+}
+
+/**
+ * Chief of Staff → Replace RAW_TIMING_ACTIVITY with finest-grain Timing hierarchy (5min blocks, last N local days).
+ * N = CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS (45). Clears that sheet then refills.
+ */
+function menuImportTimingActivityHierarchy2Days() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuImportTimingActivityHierarchy2Days: no active spreadsheet');
+    return;
+  }
+  try {
+    var d = CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS;
+    var r = CosTimingImportService.replaceActivityHierarchyLastNDays(ss, d, {});
+    CosLogger.info('menuImportTimingActivityHierarchy2Days', r);
+    if (!r.ok) {
+      ss.toast(
+        'Timing activity import failed: ' + (r.message || ''),
+        CosConstants.PRODUCT_NAME,
+        12
+      );
+      return;
+    }
+    ss.toast(
+      'Timing activity: ' +
+        (r.linesWritten != null ? r.linesWritten : 0) +
+        ' lines · RAW_TIMING_ACTIVITY (see Executions if empty).',
+      CosConstants.PRODUCT_NAME,
+      12
+    );
+  } catch (e) {
+    CosLogger.error('menuImportTimingActivityHierarchy2Days', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Prune old Timing activity rows (RAW_TIMING_ACTIVITY + import log by calendar day in sheet TZ).
+ * Set Script Property TIMING_ACTIVITY_PRUNE_TRIGGER_ENABLED true + Sync time triggers for weekly Sun ~05:00 automation.
+ */
+function menuPruneTimingActivityOldRows() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuPruneTimingActivityOldRows: no active spreadsheet');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var settings = new CosSettingsRepository().getSettings();
+  var def = String(
+    Math.max(
+      7,
+      Math.min(366, settings.timingActivityRetentionDays || CosConstants.DEFAULT_TIMING_ACTIVITY_RETENTION_DAYS)
+    )
+  );
+  var response = ui.prompt(
+    'Prune Timing activity',
+    'Keep rows whose window start (activity) or range start (log) is on or after (today − N days) in the spreadsheet timezone. Enter N (7–366). Default from TIMING_ACTIVITY_RETENTION_DAYS is ' +
+      def +
+      '.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  var raw = String(response.getResponseText() || '').replace(/^\s+|\s+$/g, '');
+  var n = raw ? parseInt(raw, 10) : parseInt(def, 10);
+  if (isNaN(n) || n < 7) {
+    ss.toast('Enter a whole number from 7 to 366.', CosConstants.PRODUCT_NAME, 8);
+    return;
+  }
+  if (n > 366) {
+    n = 366;
+  }
+  try {
+    var r = CosTimingRetentionService.pruneActivitySheets(ss, n);
+    CosLogger.info('menuPruneTimingActivityOldRows', r);
+    if (!r.ok) {
+      ss.toast('Prune failed: ' + (r.message || 'unknown'), CosConstants.PRODUCT_NAME, 12);
+      return;
+    }
+    ss.toast(
+      'Timing prune: activity −' +
+        (r.activityRemoved != null ? r.activityRemoved : 0) +
+        ' · log −' +
+        (r.logRemoved != null ? r.logRemoved : 0),
+      CosConstants.PRODUCT_NAME,
+      12
+    );
+  } catch (e) {
+    CosLogger.error('menuPruneTimingActivityOldRows', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Clear RAW_TIMING_ENTRIES then import time entries for the last N local days (same N as activity default).
+ */
+function menuSyncTimingTimeEntries2Days() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuSyncTimingTimeEntries2Days: no active spreadsheet');
+    return;
+  }
+  try {
+    var d = CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS;
+    var r = CosTimingImportService.importLastNDays(ss, d, { replaceSheet: true });
+    CosLogger.info('menuSyncTimingTimeEntries2Days', r);
+    if (!r.ok) {
+      ss.toast(
+        'Timing time entries sync failed: ' + (r.message || ''),
+        CosConstants.PRODUCT_NAME,
+        12
+      );
+      return;
+    }
+    var msg =
+      'RAW_TIMING_ENTRIES replaced for window: fetched ' +
+      (r.rowsFetched != null ? r.rowsFetched : 0) +
+      ' · inserted ' +
+      (r.rowsInserted != null ? r.rowsInserted : 0);
+    if ((r.rowsFetched || 0) === 0) {
+      msg += ' (no time entries in this date range — use activity import for app usage).';
+    }
+    ss.toast(msg, CosConstants.PRODUCT_NAME, 14);
+  } catch (e) {
+    CosLogger.error('menuSyncTimingTimeEntries2Days', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/**
+ * Chief of Staff → Append new Timing time-entry rows only (last N days; skips existing ids).
+ */
+function menuAppendTimingTimeEntries2Days() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuAppendTimingTimeEntries2Days: no active spreadsheet');
+    return;
+  }
+  try {
+    var d = CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS;
+    var r = CosTimingImportService.importLastNDays(ss, d, { replaceSheet: false });
+    CosLogger.info('menuAppendTimingTimeEntries2Days', r);
+    if (!r.ok) {
+      ss.toast(
+        'Timing time entries append failed: ' + (r.message || ''),
+        CosConstants.PRODUCT_NAME,
+        12
+      );
+      return;
+    }
+    var msg =
+      'Timing time entries (append): fetched ' +
+      (r.rowsFetched != null ? r.rowsFetched : 0) +
+      ' · inserted ' +
+      (r.rowsInserted != null ? r.rowsInserted : 0) +
+      ' · skipped ' +
+      (r.rowsSkippedExisting != null ? r.rowsSkippedExisting : 0);
+    if (r.rowsInserted === 0 && (r.rowsFetched || 0) > 0) {
+      msg += ' (already on sheet).';
+    }
+    ss.toast(msg, CosConstants.PRODUCT_NAME, 14);
+  } catch (e) {
+    CosLogger.error('menuAppendTimingTimeEntries2Days', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
 }
 
 /**
@@ -701,6 +997,42 @@ function menuSetTelegramChatId() {
     id
   );
   ss.toast('Telegram chat id saved.', CosConstants.PRODUCT_NAME, 8);
+}
+
+/**
+ * Chief of Staff → Set my first name (USER_DISPLAY_FIRST_NAME — 1:1 calendar titles)
+ */
+function menuSetUserDisplayFirstName() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    CosLogger.error('menuSetUserDisplayFirstName: no active spreadsheet');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var cur = new CosSettingsRepository().getSettings().userDisplayFirstName || '';
+  var response = ui.prompt(
+    'Your first name (1:1 calendar titles)',
+    'Shown as you in invites like “1:1 - You/Them”. Leave empty to use your email local part again (e.g. pkumar → Pkumar).\n\nCurrent: ' +
+      (cur ? cur : '(from email)') +
+      '\n\nEnter first name (e.g. Pavan):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  var name = response.getResponseText().toString().replace(/^\s+|\s+$/g, '');
+  var props = PropertiesService.getScriptProperties();
+  if (!name) {
+    props.deleteProperty(CosConstants.PROP_KEYS.USER_DISPLAY_FIRST_NAME);
+    ss.toast(
+      'Cleared — 1:1 titles will use your email local part again.',
+      CosConstants.PRODUCT_NAME,
+      8
+    );
+    return;
+  }
+  props.setProperty(CosConstants.PROP_KEYS.USER_DISPLAY_FIRST_NAME, name);
+  ss.toast('First name saved for 1:1 titles.', CosConstants.PRODUCT_NAME, 8);
 }
 
 /**
@@ -1041,6 +1373,38 @@ function menuSendDailyDigestNow() {
 }
 
 /**
+ * Chief of Staff → Generate weekly performance email now (same content is sent via Telegram when configured).
+ */
+function menuGenerateWeeklyPerformanceEmail() {
+  var ss = CosBootstrap.getSpreadsheetForRun();
+  if (!ss) {
+    CosLogger.error('menuGenerateWeeklyPerformanceEmail: no spreadsheet');
+    return;
+  }
+  try {
+    var r = CosTaskAnalyticsService.sendWeeklyReport(ss, {
+      force: true,
+      skipIdempotency: true,
+    });
+    var msg = !r.ok
+      ? 'Weekly email failed: ' + (r.message || 'unknown')
+      : r.skipped
+        ? 'Skipped: ' + (r.reason || '')
+        : 'Weekly performance email sent.';
+    ss.toast(msg, CosConstants.PRODUCT_NAME, 10);
+    CosLogger.info('menuGenerateWeeklyPerformanceEmail', r);
+  } catch (e) {
+    CosLogger.error('menuGenerateWeeklyPerformanceEmail', { error: String(e) });
+    ss.toast(String(e.message || e), CosConstants.PRODUCT_NAME, 10);
+  }
+}
+
+/** @deprecated Use menuGenerateWeeklyPerformanceEmail (menu label updated). */
+function menuSendWeeklyPerformanceReportNow() {
+  menuGenerateWeeklyPerformanceEmail();
+}
+
+/**
  * Menu composition for the bound spreadsheet.
  */
 var CosMainMenu = {
@@ -1059,10 +1423,12 @@ var CosMainMenu = {
       .addItem('Process Gmail → Tasks', 'menuProcessGmailInbox')
       .addSeparator()
       .addItem('Send daily digest now (email)', 'menuSendDailyDigestNow')
+      .addItem('Generate weekly performance email now', 'menuGenerateWeeklyPerformanceEmail')
       .addItem('Process closure queue (+ recovery)', 'menuProcessTaskClosureQueue')
       .addItem('Set closure web app URL…', 'menuSetClosureWebAppUrl')
       .addItem('Set Telegram bot token…', 'menuSetTelegramBotToken')
       .addItem('Set Telegram chat id…', 'menuSetTelegramChatId')
+      .addItem('Set my first name (1:1 calendar titles)…', 'menuSetUserDisplayFirstName')
       .addItem('Enable Telegram closure nudges', 'menuEnableTelegramClosure')
       .addItem('Disable Telegram closure nudges', 'menuDisableTelegramClosure')
       .addItem('Enable Telegram task capture', 'menuEnableTelegramTaskCapture')
@@ -1079,12 +1445,34 @@ var CosMainMenu = {
       .addItem('Send Telegram test', 'menuSendTelegramTest')
       .addItem('Set digest AI API key…', 'menuSetDigestAiApiKey')
       .addItem('Turn off digest AI', 'menuDisableDigestAi')
+      .addItem('Set Timing API key…', 'menuSetTimingApiKey')
+      .addItem('Test Timing API connection', 'menuTestTimingApiConnection')
+      .addItem(
+        'Sync Timing time entries (replace sheet · last ' +
+          CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS +
+          ' days)',
+        'menuSyncTimingTimeEntries2Days'
+      )
+      .addItem(
+        'Append Timing time entries (last ' +
+          CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS +
+          ' days)',
+        'menuAppendTimingTimeEntries2Days'
+      )
+      .addItem(
+        'Import Timing activity (5min · last ' +
+          CosTimingConstants.DEFAULT_TIMING_IMPORT_CALENDAR_DAYS +
+          ' days)',
+        'menuImportTimingActivityHierarchy2Days'
+      )
+      .addItem('Prune old Timing activity rows…', 'menuPruneTimingActivityOldRows')
       .addSeparator()
       .addItem('Schedule pending tasks', 'menuSchedulePendingTasks')
       .addItem('Schedule selected task (row)', 'menuScheduleSelectedTask')
       .addItem('Sync Jeeves calendar → sheet', 'menuSyncJeevesCalendarToSheet')
       .addSeparator()
       .addItem('Run system health check', 'menuRunSystemHealthCheck')
-      .addItem('Log settings (script editor logs)', 'menuLogSettings');
+      .addItem('Log settings (script editor logs)', 'menuLogSettings')
+      .addItem('Log all script property keys (count)', 'menuLogScriptPropertyKeys');
   },
 };

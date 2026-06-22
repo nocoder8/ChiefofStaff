@@ -9,6 +9,44 @@ var CosClosureWebApp = {
    */
   handleGet: function (e) {
     var p = e && e.parameter ? e.parameter : {};
+    var gmailThread = String(p.gmailThread || '').trim();
+    if (gmailThread) {
+      if (
+        !/^[a-fA-F0-9]+$/i.test(gmailThread) ||
+        gmailThread.length < 8
+      ) {
+        return CosClosureWebApp._page_(
+          false,
+          'Invalid link',
+          'This Gmail shortcut is not valid.',
+          ''
+        );
+      }
+      // #all finds the thread anywhere (inbox, labels, archive). #inbox/… often fails for
+      // labeled-only or non-inbox threads (“conversation could not be loaded”).
+      var gTarget =
+        'https://mail.google.com/mail/u/0/#all/' + gmailThread;
+      var fallbackHref = CosClosureLinkService._escAttr_(gTarget);
+      // HtmlService runs in a sandbox iframe; location.replace on window loads Gmail *inside*
+      // that iframe → Gmail blocks embedding (“refused to connect”). Navigate the top window.
+      var html =
+        '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+        '<title>Opening Gmail</title></head>' +
+        '<body style="margin:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:24px;text-align:center;background:#f8f9fa;">' +
+        '<p style="color:#202124;">Opening Gmail…</p>' +
+        '<p style="margin-top:16px;font-size:14px;"><a target="_top" rel="noopener" href="' +
+        fallbackHref +
+        '" style="color:#1a73e8;">Tap here if the thread does not open</a></p>' +
+        '<script>(function(){var u=' +
+        JSON.stringify(gTarget) +
+        ';try{if(window.top&&window.top!==window){window.top.location.replace(u);}else{window.location.replace(u);}}catch(e){window.open(u,"_top");}})();</script>' +
+        '</body></html>';
+      return HtmlService.createHtmlOutput(html)
+        .setTitle('Opening Gmail')
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    }
+
     var taskId = String(p.taskId || '').trim();
     var action = String(p.action || '').trim().toLowerCase();
     var exp = parseInt(String(p.exp || '0'), 10);
@@ -44,6 +82,30 @@ var CosClosureWebApp = {
       return CosClosureWebApp._closureMenuPage_(taskId, settings);
     }
 
+    var dfu = String(p.dfu || '').trim();
+    if (dfu === '1') {
+      return CosClosureWebApp._processDigestFollowUpDone_(
+        taskId,
+        exp,
+        sig,
+        settings
+      );
+    }
+
+    var digestDoneAct = String(
+      CosConstants.CLOSURE_SIGN_ACTION_DIGEST_DONE || ''
+    )
+      .trim()
+      .toLowerCase();
+    if (action === digestDoneAct) {
+      return CosClosureWebApp._processDigestFollowUpDone_(
+        taskId,
+        exp,
+        sig,
+        settings
+      );
+    }
+
     if (!taskId || CosTaskClosureService.OUTCOMES.indexOf(action) < 0) {
       return err('Invalid link', 'This link is incomplete or expired. Use the latest link from your calendar or daily digest.');
     }
@@ -71,6 +133,104 @@ var CosClosureWebApp = {
             ? 'Priority lowered and put back in the queue.'
             : 'Task dropped.';
     return CosClosureWebApp._page_(true, 'Updated', okMsg, taskId);
+  },
+
+  /**
+   * Signed “mark follow-up done” from digest (dfu=1 or legacy action=digest_done).
+   * @param {string} taskId
+   * @param {number} exp
+   * @param {string} sig
+   * @param {CosSettings} settings
+   * @returns {GoogleAppsScript.HTML.HtmlOutput}
+   * @private
+   */
+  _processDigestFollowUpDone_: function (taskId, exp, sig, settings) {
+    var err = function (title, detail) {
+      return CosClosureWebApp._page_(false, title, detail, '');
+    };
+    if (!taskId) {
+      return err(
+        'Invalid link',
+        'This link is incomplete. Use the latest link from your daily digest.'
+      );
+    }
+    if (
+      !CosClosureLinkService.verifySignature(
+        taskId,
+        CosConstants.CLOSURE_SIGN_ACTION_DIGEST_DONE,
+        exp,
+        sig,
+        settings
+      )
+    ) {
+      return err(
+        'Link expired or invalid',
+        'Request a fresh “Mark follow-up done” link from today’s Chief of Staff digest.'
+      );
+    }
+    var ssFu = CosBootstrap.getSpreadsheetForRun();
+    if (!ssFu) {
+      return err(
+        'Spreadsheet unavailable',
+        'The bound spreadsheet could not be opened. Try again from a context where the script can access your Tasks sheet.'
+      );
+    }
+    var repoFu = new CosTaskRepository(ssFu);
+    var taskFu = repoFu.fetchByTaskId(taskId);
+    if (!taskFu) {
+      return err(
+        'Task not found',
+        'This follow-up may have been removed from the Tasks sheet.'
+      );
+    }
+    if (
+      String(taskFu.priority || '').trim() !==
+      CosConstants.TASK_PRIORITY.FOLLOW_UP
+    ) {
+      return err(
+        'Wrong task type',
+        'This link only applies to Follow-up priority tasks.'
+      );
+    }
+    var stFu = String(taskFu.status || '').trim();
+    if (stFu === CosConstants.TASK_STATUS.DONE) {
+      return CosClosureWebApp._page_(
+        true,
+        'Already done',
+        'This follow-up was already marked Done in your Tasks sheet.',
+        taskId
+      );
+    }
+    if (stFu === CosConstants.TASK_STATUS.DROPPED) {
+      return err(
+        'No change',
+        'This task was dropped and cannot be marked done from this link.'
+      );
+    }
+    var okFuSt =
+      stFu === CosConstants.TASK_STATUS.PENDING ||
+      stFu === CosConstants.TASK_STATUS.FOLLOW_UP;
+    if (!okFuSt) {
+      return err(
+        'No change',
+        'Mark done from the digest is only for open follow-ups (Pending). Current status: ' +
+          stFu +
+          '. Use the sheet or closure flow if this task moved to another state.'
+      );
+    }
+    var marked = repoFu.markDone(taskId);
+    if (!marked) {
+      return err(
+        'Could not update',
+        'The task could not be marked done. Try again or update the Tasks sheet manually.'
+      );
+    }
+    return CosClosureWebApp._page_(
+      true,
+      'Marked done',
+      'Follow-up marked complete in your Tasks sheet.',
+      taskId
+    );
   },
 
   /**
